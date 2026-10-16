@@ -124,3 +124,21 @@ def test_companion_settings_merged_once(catalog, fake_home):
     catalog.local_by_name("gdrive").settings_path = srv.settings_path
     p = plan_for(catalog, local=["agentmemory", "gdrive"])
     assert len(p.settings_doc["hooks"]["Stop"]) == 1
+
+
+def test_cmux_entry_uses_claudes_pid_and_keeps_the_token_out_of_files(catalog):
+    p = plan_for(catalog, cmux=True)
+    entry = p.mcp_doc["mcpServers"]["cmux-cua"]["env"]
+    # Claude Code expands this at launch; cmux's wrapper exports it as Claude's own PID.
+    assert entry["CMUX_CUA_STATE_OWNER_PID"] == "${CMUX_CLAUDE_PID:-99}"
+    assert "--strict-mcp-config" in p.argv  # isolation is kept
+    assert p.env_overrides["CMUX_COMPUTER_USE_MCP_DISABLED"] == "1"
+    assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] and "CMUX_CUA_SOCKET_AUTH_TOKEN" not in str(p.mcp_doc)
+
+
+def test_cmux_token_from_an_unreadable_file_falls_back_with_a_warning(catalog, fake_home, monkeypatch):
+    monkeypatch.setenv("CMUX_CUA_AUTH_TOKEN_FILE", str(fake_home.tmp / "missing-token"))
+    monkeypatch.setenv("CMUX_CUA_SOCKET_AUTH_TOKEN", "inherited")
+    p = plan_for(catalog, cmux=True)
+    assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] == "inherited"
+    assert any("may be stale" in w for w in p.warnings)

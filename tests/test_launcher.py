@@ -81,3 +81,16 @@ def test_sigint_ignored_while_child_runs_and_restored(catalog, fake_popen):
     assert seen["int"] == signal.SIG_IGN
     assert popen.calls[0].signals == [signal.SIGTERM]
     assert signal.getsignal(signal.SIGINT) == before
+
+
+def test_inherited_cmux_claude_pid_is_not_passed_on_with_cmux(catalog, fake_popen, monkeypatch):
+    from claude_launcher.launcher import launch
+    from claude_launcher.plan import Selection
+
+    monkeypatch.setenv("CMUX_CLAUDE_PID", "11111")  # e.g. cm started inside an outer Claude session
+    popen = fake_popen()
+    assert launch(catalog, Selection(cmux=True), claude_bin="claude", popen=popen) == 0
+    assert "CMUX_CLAUDE_PID" not in popen.calls[0].kw["env"]
+    popen = fake_popen()
+    assert launch(catalog, Selection(), claude_bin="claude", popen=popen) == 0
+    assert popen.calls[-1].kw["env"]["CMUX_CLAUDE_PID"] == "11111"  # untouched without cmux

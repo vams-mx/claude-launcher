@@ -76,7 +76,7 @@ def exit_code(rc: int) -> int:
 def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = None,
              cwd: Path | None = None) -> int:
     popen = popen or subprocess.Popen
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items() if k not in plan.env_unset}
     env.update(plan.env_overrides)
     try:
         proc = popen(plan.argv, env=env, cwd=cwd)

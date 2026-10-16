@@ -96,11 +96,17 @@ def _scope(env: dict[str, str]) -> str:
 def _values(env: dict[str, str], client: Path, owner_pid: int) -> dict[str, str]:
     scope = _scope(env)
     uid = os.getuid()
+    # The wrapper uses the PID of the process that *becomes* Claude (it exports
+    # CMUX_CLAUDE_PID=$$ and then execs claude); cmux's app ties approvals to it.
+    # cm can't know Claude's PID before spawning it, so it writes a reference that
+    # Claude Code expands at launch from its own environment (falling back to
+    # cm's PID when claude isn't started through cmux's wrapper).
+    claude_pid = "${CMUX_CLAUDE_PID:-%d}" % owner_pid
     return {
         "client": str(client),
         "cua_socket": env.get("CMUX_CUA_SOCKET_PATH") or f"/tmp/cmux-cua-{uid}/{scope}/cmux-cua.sock",
-        "default_session": f"cmux-{env.get('CMUX_SURFACE_ID') or owner_pid}",
-        "CMUX_CLAUDE_PID": str(owner_pid),
+        "default_session": f"cmux-{env.get('CMUX_SURFACE_ID') or claude_pid}",
+        "CMUX_CLAUDE_PID": claude_pid,
         "state_dir": env.get("CMUX_CUA_STATE_DIR")
         or str(home() / "Library/Application Support/cmux/cmux-cua/runtime" / scope / "state"),
     }
@@ -156,22 +162,28 @@ def server_config(status: CmuxStatus, env: dict[str, str], owner_pid: int) -> di
     return doc["mcpServers"][SERVER_NAME]
 
 
+_TOKEN_MAX = 4096  # far above a real token (64 chars); bounds the read
+
+
 def resolve_token(env: dict[str, str]) -> tuple[str | None, str | None]:
-    """Mirror the wrapper's cmux_computer_use_auth_token: a 0600 file owned by
-    us named by CMUX_CUA_AUTH_TOKEN_FILE, else CMUX_CUA_SOCKET_AUTH_TOKEN.
-    The token is only ever placed in the child's environment, never in argv
-    or files."""
+    """The cmux-cua socket token, exactly as the known workaround gets it:
+    `export CMUX_CUA_SOCKET_AUTH_TOKEN="$(cat "$CMUX_CUA_AUTH_TOKEN_FILE")"`.
+
+    cmux hands the token over as a file (CMUX_CUA_AUTH_TOKEN_FILE), but the
+    cmux-cua 0.7.1 proxy only reads CMUX_CUA_SOCKET_AUTH_TOKEN; without it its
+    requests are unauthenticated, the daemon answers "Unauthorized daemon
+    client", and the proxy reports the runtime as "not listening". So cm reads
+    the file fresh on every launch (following symlinks, trailing newlines
+    stripped like `$(cat …)`) and only falls back to an inherited variable when
+    the file can't be read. The token only ever goes into Claude's
+    environment, never into argv, files or output."""
     path = env.get("CMUX_CUA_AUTH_TOKEN_FILE")
     if path and path.startswith("/"):
         try:
-            st = os.lstat(path)
-            if (
-                stat.S_ISREG(st.st_mode)
-                and st.st_uid == os.getuid()
-                and stat.S_IMODE(st.st_mode) == 0o600
-            ):
+            # a regular file only (symlinks followed): never block on a FIFO or a device
+            if stat.S_ISREG(os.stat(path).st_mode):
                 with open(path, encoding="utf-8", errors="replace") as fh:
-                    token = fh.readline().rstrip("\r\n")
+                    token = fh.read(_TOKEN_MAX).rstrip("\r\n")
                 if token:
                     return token, "file"
         except OSError:

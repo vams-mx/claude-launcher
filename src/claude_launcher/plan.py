@@ -76,6 +76,7 @@ class LaunchPlan:
     selected_server_names: list[str]
     denied: list[str]
     warnings: list[str]
+    env_unset: list[str] = field(default_factory=list)  # removed from the inherited environment
 
 
 class PlanError(ValueError):
@@ -141,14 +142,24 @@ def build_plan(
 
     env_overrides = {"CMUX_COMPUTER_USE_MCP_DISABLED": "1"}  # wrapper must never add its own copy
     secret_env: set[str] = set()
+    env_unset: list[str] = []
     if sel.cmux:
+        # The cmux-cua entry's owner PID is "${CMUX_CLAUDE_PID:-<cm pid>}". cmux's wrapper exports a
+        # fresh CMUX_CLAUDE_PID (Claude's own PID); an inherited one (e.g. from an outer Claude
+        # session) must not leak through when claude is started some other way.
+        env_unset.append("CMUX_CLAUDE_PID")
         if not cat.cmux.available:
             raise PlanError(f"cmux computer-use unavailable: {cat.cmux.reason}")
         servers[cmux_mod.SERVER_NAME] = cmux_mod.server_config(cat.cmux, env, owner_pid)
-        token, _src = cmux_mod.resolve_token(env)
+        token, src = cmux_mod.resolve_token(env)
         if token:
+            # cmux-cua 0.7.1's proxy reads only this variable (not the token file)
             env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] = token
             secret_env.add("CMUX_CUA_SOCKET_AUTH_TOKEN")
+        if src == "env":
+            warnings.append("cmux: token taken from the inherited CMUX_CUA_SOCKET_AUTH_TOKEN because "
+                            f"CMUX_CUA_AUTH_TOKEN_FILE ({env.get('CMUX_CUA_AUTH_TOKEN_FILE') or 'unset'}) "
+                            "can't be read; it may be stale")
         if cat.cmux.reason:
             warnings.append(f"cmux: {cat.cmux.reason}")
 
@@ -208,5 +219,5 @@ def build_plan(
     return LaunchPlan(
         argv=argv, mcp_doc=mcp_doc, settings_doc=settings, mcp_path=mcp_path, settings_path=settings_path,
         env_overrides=env_overrides, secret_env=secret_env, mode=mode,
-        selected_server_names=selected_names, denied=denied, warnings=warnings,
+        selected_server_names=selected_names, denied=denied, warnings=warnings, env_unset=env_unset,
     )
