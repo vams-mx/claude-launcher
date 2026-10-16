@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-launcher"
+version = "0.1.0"
+description = "cm: start Claude Code with exactly the MCP servers, claude.ai connectors, plugins and cmux computer-use you pick"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "textual>=0.80",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+cm = "claude_launcher.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_launcher"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
