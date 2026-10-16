@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from rich.text import Text
 from textual import on, work
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -19,7 +20,7 @@ from textual.widgets.selection_list import Selection as Item
 
 from . import costs as costs_mod
 from . import health, profiles
-from .catalog import Catalog, refresh_connectors, discover
+from .catalog import Catalog, Connector, discover_connectors, refresh_connectors
 from .plan import PlanError, Selection
 from .preview import preview_plan, render
 
@@ -153,7 +154,11 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
     def _connector_items(self) -> list[Item]:
         items = []
-        shown = [c for c in self.cat.connectors if c.verified] or self.cat.connectors
+        # Once `claude mcp list` verified some, unverified names are listed only when selected (e.g. by a
+        # profile); without a row they would be silently dropped from the launch.
+        shown = [c for c in self.cat.connectors if c.verified or c.name in self.sel.connectors]
+        if not any(c.verified for c in self.cat.connectors):
+            shown = self.cat.connectors
         for c in shown:
             t = Text(c.short, style="bold" if c.verified else "dim")
             t.append_text(self._cost(c.key))
@@ -244,8 +249,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     def _sync_resume_visibility(self) -> None:
         self.query_one("#resume_id", Input).display = self._read_selection().session == "resume"
 
+    def _rebuild_connectors(self) -> None:
+        sl = self.query_one("#connectors", SelectionList)
+        sl.clear_options()
+        sl.add_options(self._connector_items())  # ticks follow self.sel.connectors
+
     def _apply(self, sel: Selection) -> None:
-        for wid, values in (("local", sel.local), ("connectors", sel.connectors), ("plugins", sel.plugins),
+        self.sel = sel
+        self._rebuild_connectors()  # the profile may use an unverified connector that has no row yet
+        for wid, values in (("local", sel.local), ("plugins", sel.plugins),
                             ("cmux", ["cmux"] if sel.cmux else [])):
             sl = self.query_one(f"#{wid}", SelectionList)
             sl.deselect_all()
@@ -258,7 +270,6 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             for b in self.query_one(f"#{wid}", RadioSet).query(RadioButton):
                 if b.name == value:
                     b.value = True
-        self.sel = sel
         self._sync_resume_visibility()
         self._update_preview()
 
@@ -352,8 +363,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         if isinstance(focused, Button):
             focused.press()
             return
-        if isinstance(focused, Select) and focused.expanded:
-            return  # let the overlay handle it
+        if focused is not None and any(isinstance(n, Select) for n in focused.ancestors_with_self):
+            # A closed Select opens on Enter; an open one has focused its overlay, which picks the option.
+            raise SkipAction()
         self.action_do_launch()
 
     def action_do_launch(self) -> None:
@@ -377,21 +389,24 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     @work(thread=True, exclusive=True, group="refresh")
     def action_refresh_connectors(self) -> None:
         self.call_from_thread(self.notify, "refreshing claude.ai connectors (claude mcp list)…")
+        warnings: list[str] = []
         try:
             refresh_connectors(self.claude_bin)
+            conns, refreshed_at = discover_connectors(warnings)  # file I/O stays off the UI thread
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
             self.call_from_thread(self.notify, f"refresh failed: {exc}", severity="error")
             return
-        self.call_from_thread(self._reload_connectors)
+        self.call_from_thread(self._reload_connectors, conns, refreshed_at, warnings)
 
-    def _reload_connectors(self) -> None:
-        keep = self._read_selection()
-        self.cat = discover(self.cat.cwd)
-        sl = self.query_one("#connectors", SelectionList)
-        sl.clear_options()
-        self.sel = keep
-        sl.add_options(self._connector_items())
+    def _reload_connectors(self, conns: list[Connector], refreshed_at: str | None, warnings: list[str]) -> None:
+        self.sel = self._read_selection()
+        # Swap only the connectors, in place: local/plugin rows stay consistent with self.cat, and the
+        # caller launches with this same Catalog object.
+        self.cat.connectors, self.cat.connectors_refreshed_at = conns, refreshed_at
+        self._rebuild_connectors()
         self.query_one("#conn_note", Static).update(self._connector_note())
+        for w in warnings:
+            self.notify(w, severity="warning")
         self._update_preview()
         self.notify(f"{len(self.cat.connectors)} connectors")
 

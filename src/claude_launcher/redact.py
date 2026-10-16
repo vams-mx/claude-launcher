@@ -10,6 +10,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 MASK = "‹redacted›"
 _SECRETISH = re.compile(r"(key|token|secret|passw|pwd|auth|credential|bearer|cookie|session)", re.I)
+_KV = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)=(.*)$", re.S)  # GITHUB_TOKEN=ghp_…
+_HEADER = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$", re.S)  # Authorization: Bearer …
+_SCHEME = re.compile(r"^(bearer|basic|token)\s+\S", re.I)  # a bare "Bearer sk-…"
 
 
 def redact_url(url: str) -> str:
@@ -26,6 +29,23 @@ def redact_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
 
 
+def _redact_value(a: str) -> str:
+    """A non-flag argument: KEY=value with a secret-looking key, a secret
+    header ("Authorization: Bearer …"), a bare auth scheme value, or a URL."""
+    if m := _KV.match(a):
+        k, v = m.groups()
+        if _SECRETISH.search(k):
+            return f"{k}={MASK}"
+        return f"{k}={redact_url(v)}" if "://" in v else a
+    if "://" in a:
+        return redact_url(a)
+    if (m := _HEADER.match(a)) and _SECRETISH.search(m.group(1)):
+        return f"{m.group(1)}: {MASK}"
+    if _SCHEME.match(a):
+        return MASK
+    return a
+
+
 def redact_args(args: list[str]) -> list[str]:
     out: list[str] = []
     hide_next = False
@@ -35,17 +55,14 @@ def redact_args(args: list[str]) -> list[str]:
             hide_next = False
             continue
         if a.startswith("-") and "=" in a:
-            k, _ = a.split("=", 1)
-            out.append(f"{k}={MASK}" if _SECRETISH.search(k) else a)
+            k, v = a.split("=", 1)
+            out.append(f"{k}={MASK}" if _SECRETISH.search(k) else f"{k}={_redact_value(v)}")
             continue
         if a.startswith("-") and _SECRETISH.search(a):
             out.append(a)
             hide_next = True
             continue
-        if "://" in a:
-            out.append(redact_url(a))
-            continue
-        out.append(a)
+        out.append(_redact_value(a))
     return out
 
 

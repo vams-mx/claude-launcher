@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "textual>=0.80",
+    "textual>=8.0",  # Select.NULL (tui.py) replaced Select.BLANK in 8.0.0
     "rich>=13.7",
 ]
 

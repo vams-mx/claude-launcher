@@ -123,3 +123,41 @@ def test_measure(fake_home, monkeypatch, capsys):
     monkeypatch.setattr(costs_mod, "measure", lambda cat, keys, **kw: ({k: costs_mod.Cost(10, 1) for k in keys}, 100))
     assert run("--measure", "mcp:gdrive") == 0
     assert "mcp:gdrive" in capsys.readouterr().out
+
+
+def test_cwd_flag_runs_claude_in_that_directory(fake_home, fake_popen, monkeypatch):
+    import subprocess
+
+    other = fake_home.tmp / "elsewhere"
+    other.mkdir()
+    popen = fake_popen()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    assert run("--cwd", str(other), "--no-mcp") == 0
+    assert popen.calls[0].kw["cwd"] == other.resolve()
+
+
+def test_measure_bad_key_fails_up_front_with_a_useful_message(fake_home, capsys):
+    assert run("--measure", "mcp:gdrive,gdrive") == 1
+    err = capsys.readouterr().err
+    assert "cannot measure 'gdrive': expected mcp:<name>" in err
+    assert "real processes" not in err  # no probe was started
+
+
+def test_broken_default_profile_is_reported_not_a_crash(fake_home, capsys, launched):
+    path = profiles.profiles_dir() / "broken.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[]")
+    profiles.set_default("broken")
+    assert run() == 2  # plain `cm`
+    assert "profile 'broken' is not a JSON object" in capsys.readouterr().err
+    assert not launched
+
+
+def test_refresh_does_not_swallow_dry_run_or_save_profile(fake_home, monkeypatch, capsys, launched):
+    calls = []
+    monkeypatch.setattr(cli, "refresh_connectors", lambda claude_bin: calls.append(claude_bin) or [])
+    assert run("--refresh", "--dry-run", "--save-profile", "after-refresh") == 0
+    out = capsys.readouterr().out
+    assert calls and "Isolation:" in out  # the preview was printed, not skipped
+    assert profiles.list_profiles() == ["after-refresh"] and not launched
+    assert run("--refresh") == 0 and not launched  # refresh alone still just refreshes

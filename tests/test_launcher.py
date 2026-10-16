@@ -35,6 +35,7 @@ def test_launch_writes_private_files_for_runtime_then_cleans_up(catalog, fake_po
     assert env["CMUX_COMPUTER_USE_MCP_DISABLED"] == "1"
     assert env["CMUX_CUA_SOCKET_AUTH_TOKEN"] == CUA_TOKEN
     assert env["HOME"] == os.environ["HOME"]  # environment passed through
+    assert proc.kw["cwd"] == catalog.cwd  # claude runs where the catalog was discovered
     assert CUA_TOKEN not in json.dumps(seen["mcp"])
 
 

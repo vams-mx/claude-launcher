@@ -37,3 +37,15 @@ def test_reconcile_drops_vanished_items(catalog):
     assert out.local == ["agentmemory"] and out.connectors == ["claude.ai Slack"]
     assert out.plugins == ["prompt-tools@vams"] and out.cmux is True
     assert len(notes) == 3
+
+
+@pytest.mark.parametrize("content", ["[]", "null", "42", None])  # None: unreadable (a directory)
+def test_malformed_or_unreadable_profile_is_a_profile_error(fake_home, content):
+    path = profiles.profiles_dir() / "bad.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if content is None:
+        path.mkdir()
+    else:
+        path.write_text(content)
+    with pytest.raises(profiles.ProfileError, match="bad"):
+        profiles.load("bad")

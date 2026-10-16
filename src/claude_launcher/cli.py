@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             _err(f"refresh failed: {exc}")
             return 1
         print(f"{len(found)} claude.ai connectors: " + ", ".join(n for n, _ in found))
-        if not (a.list or a.measure or _selection_flags_given(a)):
+        if not (a.list or a.measure or a.dry_run or a.interactive or a.save_profile or _selection_flags_given(a)):
             return 0
 
     cat = discover(cwd)
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         keys = costs_mod.item_keys(cat) if a.measure == "all" else _csv(a.measure)
         print(f"measuring {len(keys)} item(s) with headless Haiku probes (each costs ~1-2¢)…", file=sys.stderr)
         try:
-            res, base = costs_mod.measure(cat, keys, claude_bin=claude_bin,
+            res, base = costs_mod.measure(cat, keys, claude_bin=claude_bin, strict=a.measure != "all",
                                           progress=lambda m: print(f"  · {m}", file=sys.stderr))
         except Exception as exc:  # noqa: BLE001
             _err(str(exc))

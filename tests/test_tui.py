@@ -117,3 +117,102 @@ def test_unavailable_cmux_blocks(catalog):
         await pilot.press("escape")
 
     drive(app, steps)
+
+
+def test_enter_in_profile_dropdown_selects_instead_of_launching(catalog):
+    from textual.widgets import Select
+
+    profiles.save("a", Selection(local=["gdrive"]))
+    profiles.save("b", Selection(local=["agentmemory"], model="sonnet"))
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        sel = app.query_one("#profile", Select)
+        sel.focus()
+        await pilot.press("enter")  # closed Select: Enter opens it
+        await pilot.pause()
+        assert app.return_value is None and sel.expanded
+        await pilot.press("down", "down", "enter")  # blank, a, b -> pick "b"
+        await pilot.pause()
+        await pilot.pause()
+        assert app.return_value is None and not sel.expanded
+        assert sel.value == "b" and app.profile_name == "b"
+        app.action_do_launch()
+
+    result = drive(app, steps)
+    assert result[1].local == ["agentmemory"] and result[1].model == "sonnet"
+
+
+def test_unverified_connector_from_profile_survives_the_screen(catalog):
+    # "claude.ai Gmail" is only in claudeAiMcpEverConnected (unverified) while verified connectors exist
+    assert not next(c for c in catalog.connectors if c.short == "Gmail").verified
+    profiles.save("mail", Selection(connectors=["claude.ai Gmail", "claude.ai Slack"]))
+    app = LauncherApp(catalog, Selection(connectors=["claude.ai Gmail"]), claude_bin="claude")
+
+    async def steps(app, pilot):
+        from textual.widgets import Select
+
+        assert app.query_one("#connectors", SelectionList).selected == ["claude.ai Gmail"]
+        app.query_one("#profile", Select).value = "mail"  # loading a profile later keeps it too
+        await pilot.pause()
+        await pilot.pause()
+        app.action_do_launch()
+
+    result = drive(app, steps)
+    assert set(result[1].connectors) == {"claude.ai Gmail", "claude.ai Slack"}
+
+
+def test_refresh_reads_connectors_off_the_ui_thread_and_updates_the_catalog_in_place(catalog, monkeypatch):
+    import json
+    import threading
+
+    import claude_launcher.tui as tui
+    from claude_launcher.catalog import connectors_cache_path, discover_connectors
+
+    def fake_refresh(claude_bin):
+        connectors_cache_path().write_text(json.dumps({"refreshed_at": "2026-10-15T12:00:00+00:00", "connectors": [
+            {"name": "claude.ai Slack", "status": "Connected"}, {"name": "claude.ai Notion", "status": "Connected"}]}))
+
+    threads = []
+
+    def spy(warnings):
+        threads.append(threading.current_thread())
+        return discover_connectors(warnings)
+
+    monkeypatch.setattr(tui, "refresh_connectors", fake_refresh)
+    monkeypatch.setattr(tui, "discover_connectors", spy)
+    local_before = catalog.local
+    app = LauncherApp(catalog, Selection(connectors=["claude.ai Slack"]), claude_bin="claude")
+
+    async def steps(app, pilot):
+        app.action_refresh_connectors()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.pause()
+        rows = app.query_one("#connectors", SelectionList)
+        values = [rows.get_option_at_index(i).value for i in range(rows.option_count)]
+        assert "claude.ai Notion" in values and rows.selected == ["claude.ai Slack"]
+        rows.select("claude.ai Notion")
+        await pilot.pause()
+        app.action_do_launch()
+
+    result = drive(app, steps)
+    assert threads and threads[0] is not threading.main_thread()
+    assert app.cat is catalog and catalog.local is local_before  # same Catalog the CLI launches with
+    assert "claude.ai Notion" in {c.name for c in catalog.connectors}
+    assert catalog.connectors_refreshed_at == "2026-10-15T12:00:00+00:00"
+    assert result[1].connectors == ["claude.ai Notion", "claude.ai Slack"]  # catalog order
+
+
+def test_textual_floor_has_select_null():
+    # tui.py uses Select.NULL, which replaced Select.BLANK in Textual 8.0.0 (verified against 7.5.0 and 8.0.0)
+    import re
+    import tomllib
+    from pathlib import Path
+
+    from textual.widgets import Select
+
+    doc = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    spec = next(d for d in doc["project"]["dependencies"] if d.startswith("textual"))
+    floor = tuple(int(x) for x in re.search(r">=\s*([\d.]+)", spec).group(1).split("."))
+    assert floor >= (8, 0) and hasattr(Select, "NULL")

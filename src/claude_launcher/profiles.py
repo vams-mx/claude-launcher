@@ -36,11 +36,16 @@ def list_profiles() -> list[str]:
 def load(name: str) -> Selection:
     p = _path(name)
     try:
-        return Selection.from_dict(json.loads(p.read_text()))
+        doc = json.loads(p.read_text())
     except FileNotFoundError:
         raise ProfileError(f"no profile named {name!r}") from None
+    except OSError as exc:
+        raise ProfileError(f"cannot read profile {name!r}: {exc}") from None
     except ValueError as exc:
         raise ProfileError(f"profile {name!r} is not valid JSON: {exc}") from None
+    if not isinstance(doc, dict):
+        raise ProfileError(f"profile {name!r} is not a JSON object ({p})")
+    return Selection.from_dict(doc)
 
 
 def save(name: str, sel: Selection) -> Path:

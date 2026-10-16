@@ -20,7 +20,7 @@ from typing import Callable, Iterable
 from . import probe as probe_mod
 from .catalog import Catalog
 from .paths import config_dir
-from .plan import Selection, build_plan
+from .plan import PlanError, Selection, build_plan
 
 
 @dataclass
@@ -76,12 +76,26 @@ def selection_for(cat: Catalog, key: str) -> Selection:
     if kind == "mcp":
         return Selection(local=[name])
     if kind == "connector":
-        return Selection(connectors=[c.name for c in cat.connectors if c.short == name])
+        conns = [c.name for c in cat.connectors if c.short == name]
+        if not conns:
+            raise ValueError(f"unknown connector {name!r} (see cm --list, cm --refresh)")
+        return Selection(connectors=conns)
     if kind == "plugin":
         return Selection(plugins=[name])
     if key == "cmux":
         return Selection(cmux=True)
-    raise ValueError(key)
+    raise ValueError("expected mcp:<name>, connector:<name>, plugin:<id> or cmux")
+
+
+def check_keys(cat: Catalog, keys: list[str], claude_bin: str = "claude") -> dict[str, str]:
+    """Return {key: reason} for every key that cannot be measured, before any (paid) probe runs."""
+    bad: dict[str, str] = {}
+    for k in keys:
+        try:
+            build_plan(cat, selection_for(cat, k), claude_bin=claude_bin, session_dir=Path(tempfile.gettempdir()))
+        except (PlanError, ValueError) as exc:
+            bad[k] = str(exc)
+    return bad
 
 
 def selection_keys(cat: Catalog, sel: Selection) -> list[str]:
@@ -115,8 +129,17 @@ def measure(
     progress: Callable[[str], None] = lambda _m: None,
     run_probe: Callable[..., probe_mod.ProbeResult] | None = None,
     full: bool = True,
+    strict: bool = True,
 ) -> tuple[dict[str, Cost], int]:
+    """strict: any unmeasurable key aborts the run (keys the user named). Otherwise they are
+    skipped with a warning (measuring everything, where one broken item shouldn't block the rest)."""
     run_probe = run_probe or probe_mod.run
+    bad = check_keys(cat, keys, claude_bin)
+    if bad and strict:
+        raise ValueError("cannot measure " + "; ".join(f"{k!r}: {why}" for k, why in bad.items()))
+    for k, why in bad.items():
+        progress(f"  ! skipping {k}: {why}")
+    keys = [k for k in keys if k not in bad]
     costs = load()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -137,20 +160,26 @@ def measure(
         raise RuntimeError(f"baseline probe failed: {base.error.strip()[:200]}")
     base_tools = len(base.mcp_tools)
     base_full = one(Selection(), True) if full else None
-    for k in keys:
-        progress(k)
-        r = one(selection_for(cat, k))
-        if r.returncode != 0 or not r.input_tokens:
-            progress(f"  ! {k} failed: {r.error.strip()[:120]}")
-            continue
-        # tools = MCP tools the item adds (built-in MCP resource helpers excluded)
-        c = Cost(max(0, r.input_tokens - base.input_tokens), max(0, len(r.mcp_tools) - base_tools), now)
-        if base_full is not None and base_full.input_tokens and (c.tools or k.startswith("connector:")):
-            rf = one(selection_for(cat, k), True)
-            if rf.returncode == 0 and rf.input_tokens:
-                c.full_tokens = max(0, rf.input_tokens - base_full.input_tokens)
-        costs[k] = c
-    save(costs, base.input_tokens)
+    try:
+        for k in keys:
+            progress(k)
+            try:
+                r = one(selection_for(cat, k))
+            except (PlanError, OSError, ValueError) as exc:
+                progress(f"  ! {k} failed: {exc}")
+                continue
+            if r.returncode != 0 or not r.input_tokens:
+                progress(f"  ! {k} failed: {r.error.strip()[:120]}")
+                continue
+            # tools = MCP tools the item adds (built-in MCP resource helpers excluded)
+            c = Cost(max(0, r.input_tokens - base.input_tokens), max(0, len(r.mcp_tools) - base_tools), now)
+            if base_full is not None and base_full.input_tokens and (c.tools or k.startswith("connector:")):
+                rf = one(selection_for(cat, k), True)
+                if rf.returncode == 0 and rf.input_tokens:
+                    c.full_tokens = max(0, rf.input_tokens - base_full.input_tokens)
+            costs[k] = c
+    finally:
+        save(costs, base.input_tokens)  # keep what was paid for, even if a later probe blows up
     return costs, base.input_tokens
 
 

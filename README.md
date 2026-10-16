@@ -19,13 +19,15 @@ cm --mcp gdrive -- --add-dir ../lib  # everything after -- goes to claude unchan
 ## Install
 
 ```bash
-cd ~/Documents/work/general/utilities/claude-code-initialzr
+cd claude-launcher             # your checkout of this repo
 uv tool install -e .          # or: pipx install -e .
 cm --refresh                  # cache the claude.ai connector list (runs `claude mcp list`)
 cm --measure                  # optional, ~25 cheap Haiku probes (~$0.25): real context cost per item
 ```
 
-Before the first install, `cm` was not on PATH and was not a zsh alias or function. Python 3.11 or later is required. The only dependency is `textual`, which brings `rich`.
+Before the first install, `cm` was not on PATH and was not a zsh alias or function. Python 3.11 or later is required (the test suite passes on 3.11 and 3.14). The only dependency is `textual`, which brings `rich`.
+
+`uv tool` / `pipx` give the `cm` command its own isolated environment, which is all you need to use it. The pyenv setup under [Development](#development) is only for working on the code.
 
 ## The screen
 
@@ -203,7 +205,13 @@ claude [--strict-mcp-config] [--mcp-config=$TMPDIR/cm-session-XXXX/mcp.json] \
 ## Development
 
 ```bash
-uv venv && uv pip install -e '.[dev]'
-.venv/bin/python -m pytest              # hermetic: fake HOME, subprocess tripwires, no network
-python scripts/smoke_verify.py --yes    # opt-in: real headless launches (costs ~$0.10)
+# pyenv + pyenv-virtualenv; no shell hooks needed. The venv lives in ~/.pyenv, not in the repo.
+pyenv install -s 3.14                                    # .python-version pins 3.14
+pyenv virtualenv "$(pyenv latest 3.14)" claude-launcher  # once
+PY="$(pyenv prefix claude-launcher)/bin/python"
+"$PY" -m pip install -e '.[dev]'
+"$PY" -m pytest                          # hermetic: fake HOME, subprocess tripwires, no network
+"$PY" scripts/smoke_verify.py --yes      # opt-in: real headless launches (costs ~$0.10)
 ```
+
+With pyenv-virtualenv shell hooks set up, `pyenv activate claude-launcher` and plain `python` work too.

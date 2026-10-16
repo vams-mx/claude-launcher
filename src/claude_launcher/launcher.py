@@ -73,12 +73,13 @@ def exit_code(rc: int) -> int:
     return 128 + (-rc) if rc < 0 else rc
 
 
-def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = None) -> int:
+def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = None,
+             cwd: Path | None = None) -> int:
     popen = popen or subprocess.Popen
     env = dict(os.environ)
     env.update(plan.env_overrides)
     try:
-        proc = popen(plan.argv, env=env)
+        proc = popen(plan.argv, env=env, cwd=cwd)
     except FileNotFoundError:
         print(f"cm: cannot run {plan.argv[0]!r}: not found (use --claude-bin)", file=sys.stderr)
         return 127
@@ -103,4 +104,4 @@ def launch(
     with session_dir() as d:
         plan = build_plan(cat, sel, claude_bin=claude_bin, session_dir=d)
         write_session_files(plan)
-        return run_plan(plan, popen)
+        return run_plan(plan, popen, cwd=cat.cwd)  # the directory the catalog (and deny list) was built for

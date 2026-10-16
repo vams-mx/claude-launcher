@@ -73,3 +73,57 @@ def test_redaction():
     r = redact_server({"command": "c", "env": {"A": "1"}, "headers": {"Authorization": "Bearer z"},
                        "url": "https://x/y?k=v"})
     assert r["env"] == {"A": MASK} and r["headers"] == {"Authorization": MASK} and "k=v" not in r["url"]
+
+
+def test_redaction_of_env_pairs_and_auth_headers():
+    args = ["run", "-e", "GITHUB_TOKEN=ghp_secret1", "--env=API_KEY=secret2", "-e", "LOG_LEVEL=debug",
+            "--header", "Authorization: Bearer sk-secret3", "--header=X-Api-Key: secret4",
+            "-H", "Accept: application/json", "Bearer sk-secret5", "BASE=https://h/p?token=secret6"]
+    out = redact_args(args)
+    joined = " ".join(out)
+    for n in range(1, 7):
+        assert f"secret{n}" not in joined
+    assert out == ["run", "-e", f"GITHUB_TOKEN={MASK}", f"--env=API_KEY={MASK}", "-e", "LOG_LEVEL=debug",
+                   "--header", f"Authorization: {MASK}", f"--header=X-Api-Key: {MASK}",
+                   "-H", "Accept: application/json", MASK, f"BASE=https://h/p?{MASK}"]
+    # the same args in a server config, as --list --json / dry runs show them
+    assert "ghp_secret1" not in str(redact_server({"command": "docker", "args": args}))
+
+
+def test_measure_rejects_bad_keys_before_any_probe(catalog, fake_home):
+    import pytest
+
+    calls = []
+    with pytest.raises(ValueError) as exc:
+        costs_mod.measure(catalog, ["mcp:gdrive", "gdrive", "mcp:typo", "connector:Nope"], claude_bin="claude",
+                          run_probe=lambda *a, **k: calls.append(a))
+    msg = str(exc.value)
+    assert "'gdrive': expected mcp:<name>" in msg and "'mcp:typo'" in msg and "'connector:Nope'" in msg
+    assert "mcp:gdrive'" not in msg and calls == []
+
+
+def test_measure_all_skips_bad_items_instead_of_blocking_the_run(catalog, fake_home):
+    def fake_probe(argv, env, cwd=None):
+        mcp = json.load(open(next(a.split("=", 1)[1] for a in argv if a.startswith("--mcp-config="))))
+        return probe.ProbeResult(0, tools=["Bash"], input_tokens=1000 + 250 * len(mcp["mcpServers"]), model="haiku")
+
+    msgs = []
+    res, _ = costs_mod.measure(catalog, ["mcp:gdrive", "mcp:typo"], claude_bin="claude", run_probe=fake_probe,
+                               full=False, strict=False, progress=msgs.append)
+    assert res["mcp:gdrive"].tokens == 250 and "mcp:typo" not in res
+    assert any("skipping mcp:typo" in m for m in msgs)
+
+
+def test_measure_keeps_paid_results_when_a_later_probe_fails(catalog, fake_home):
+    import pytest
+
+    def fake_probe(argv, env, cwd=None):
+        mcp = json.load(open(next(a.split("=", 1)[1] for a in argv if a.startswith("--mcp-config="))))
+        if "agentmemory" in mcp["mcpServers"]:
+            raise KeyboardInterrupt  # e.g. Ctrl+C half-way through
+        return probe.ProbeResult(0, tools=["Bash"], input_tokens=1000 + 250 * len(mcp["mcpServers"]), model="haiku")
+
+    with pytest.raises(KeyboardInterrupt):
+        costs_mod.measure(catalog, ["mcp:gdrive", "mcp:agentmemory"], claude_bin="claude", run_probe=fake_probe,
+                          full=False)
+    assert costs_mod.load()["mcp:gdrive"].tokens == 250
