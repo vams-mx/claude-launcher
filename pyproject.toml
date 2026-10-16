@@ -4,15 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-launcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "cm: start Claude Code with exactly the MCP servers, claude.ai connectors, plugins and cmux computer-use you pick"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+classifiers = [
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = [
     "textual>=8.0",  # Select.NULL (tui.py) replaced Select.BLANK in 8.0.0
     "rich>=13.7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vams-mx/claude-launcher"
+Issues = "https://github.com/vams-mx/claude-launcher/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

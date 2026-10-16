@@ -216,3 +216,131 @@ def test_textual_floor_has_select_null():
     spec = next(d for d in doc["project"]["dependencies"] if d.startswith("textual"))
     floor = tuple(int(x) for x in re.search(r">=\s*([\d.]+)", spec).group(1).split("."))
     assert floor >= (8, 0) and hasattr(Select, "NULL")
+
+
+def test_sober_default_theme_and_ctrl_t_cycles_and_saves(catalog):
+    from claude_launcher import config, themes
+
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        assert app.theme == themes.DEFAULT_THEME == "cm-graphite"
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert app.theme == themes.THEME_CYCLE[1]
+        assert config.load_config()["theme"] == themes.THEME_CYCLE[1]
+        await pilot.press("escape")
+
+    drive(app, steps)
+    assert LauncherApp(catalog, Selection(), claude_bin="claude").theme == themes.THEME_CYCLE[1]  # remembered
+
+
+def test_unknown_configured_theme_falls_back_with_a_note(catalog):
+    from claude_launcher import config, themes
+
+    config.save_config({"theme": "nope"})
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+    assert app.theme == themes.DEFAULT_THEME and any("nope" in n for n in app.notes)
+
+
+def test_theme_cycle_wraps_and_only_lists_real_themes():
+    from textual.app import App
+
+    from claude_launcher import themes
+
+    app = App()
+    for t in themes.CUSTOM:
+        app.register_theme(t)
+    assert set(themes.THEME_CYCLE) <= set(app.available_themes)
+    assert themes.next_theme(themes.THEME_CYCLE[-1]) == themes.THEME_CYCLE[0]
+    assert themes.next_theme("not-in-cycle") == themes.THEME_CYCLE[0]
+
+
+def test_theme_change_recolours_rows_and_keeps_the_selection(catalog):
+    from claude_launcher import themes
+
+    app = LauncherApp(catalog, Selection(local=["gdrive"]), claude_bin="claude")
+
+    async def steps(app, pilot):
+        assert app._palette()["cmd"] == themes.GRAPHITE.primary
+        app.theme = themes.PAPER.name
+        await pilot.pause()
+        assert app._palette()["cmd"] == themes.PAPER.primary
+        assert app.query_one("#local", SelectionList).selected == ["gdrive"]
+        app.action_do_launch()
+
+    assert drive(app, steps)[1].local == ["gdrive"]
+
+
+def test_theme_set_directly_like_the_palette_is_saved(catalog):
+    from claude_launcher import config
+
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        app.theme = "nord"  # what Ctrl+P → Theme does
+        await pilot.pause()
+        assert config.load_config()["theme"] == "nord"
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_enter_in_the_command_palette_never_launches(catalog):
+    from claude_launcher import config
+
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        for ch in "theme":
+            await pilot.press(ch)
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")  # opens the theme list
+        await pilot.pause()
+        await pilot.pause()
+        assert app.return_value is None and len(app.screen_stack) > 1
+        for ch in "cm-sand":
+            await pilot.press(ch)
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")  # picks the theme
+        await pilot.pause()
+        await pilot.pause()
+        assert app.return_value is None and app.theme == "cm-sand"
+        assert config.load_config()["theme"] == "cm-sand"
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_non_string_theme_in_config_falls_back_instead_of_crashing(catalog):
+    from claude_launcher import config, themes
+
+    for bad in (["cm-paper"], {"x": 1}, 7):
+        config.save_config({"theme": bad})
+        app = LauncherApp(catalog, Selection(), claude_bin="claude")
+        assert app.theme == themes.DEFAULT_THEME and any("unknown theme" in n for n in app.notes)
+
+
+def _contrast(a: str, b: str) -> float:
+    def lum(h: str) -> float:
+        h = h.lstrip("#")
+        ch = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        ch = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
+        return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_cm_themes_keep_text_readable():
+    from claude_launcher import themes
+
+    for t in themes.CUSTOM:
+        for role in ("foreground", "primary", "secondary", "accent", "warning", "error", "success"):
+            for bg in ("background", "surface", "panel"):
+                ratio = _contrast(getattr(t, role), getattr(t, bg))
+                assert ratio >= 4.5, f"{t.name}: {role} on {bg} is {ratio:.2f}:1"

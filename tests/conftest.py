@@ -50,6 +50,10 @@ def no_real_processes(monkeypatch):
     import claude_launcher.health as health
 
     monkeypatch.setattr(health, "check", lambda srv, timeout=0.8: None)
+    # `claude --version` is a process too: pretend the verified version is installed
+    import claude_launcher.compat as compat
+
+    monkeypatch.setattr(compat, "installed_version", lambda claude_bin, run=None, timeout=5: compat.VERIFIED_VERSIONS[0])
 
 
 @pytest.fixture
@@ -59,21 +63,20 @@ def fake_home(tmp_path, monkeypatch):
     project.mkdir(parents=True)
     (project / ".git").mkdir()
     for var in list(os.environ):
-        if var.startswith(("CMUX_", "CLAUDE", "AGENTMEMORY", "XDG_CONFIG_HOME")):
+        if var.startswith(("CMUX_", "CLAUDE", "AGENTMEMORY", "XDG_CONFIG_HOME", "CM_", "INSTALL_AGENT_MEMORY")):
             monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CM_CONFIG_DIR", str(home / ".config" / "claude-launcher"))
+    monkeypatch.setenv("HOME", str(home))  # cm's home is therefore ~/.claude-launcher (the default)
     monkeypatch.setenv("CM_MANAGED_DIR", str(tmp_path / "managed"))
     monkeypatch.chdir(project)
 
     _w(home / ".claude" / "settings.json", {
         "env": {"SUPER_SECRET_PASSWORD": SECRET},
         "model": "opus",
-        "enabledPlugins": {"commit-commands@official": True, "prompt-tools@vams": True, "old@x": False},
+        "enabledPlugins": {"commit-commands@official": True, "prompt-tools@market": True, "old@x": False},
     })
     _w(home / ".claude" / "plugins" / "installed_plugins.json", {"version": 2, "plugins": {
         "commit-commands@official": [{"scope": "user", "installPath": str(home / "plug" / "commit")}],
-        "prompt-tools@vams": [{"scope": "user", "installPath": str(home / "plug" / "prompt")}],
+        "prompt-tools@market": [{"scope": "user", "installPath": str(home / "plug" / "prompt")}],
         "dbtools@x": [{"scope": "local", "installPath": str(home / "plug" / "dbtools"), "projectPath": str(project)}],
     }})
     _w(home / "plug" / "dbtools" / ".mcp.json", {"mcpServers": {"db": {"command": "dbserver"}}})
@@ -90,18 +93,21 @@ def fake_home(tmp_path, monkeypatch):
         "oauthAccount": {"emailAddress": "someone@example.com"},
     })
     _w(project / ".mcp.json", {"mcpServers": {"teamsrv": {"type": "http", "url": "https://team.example.com/mcp"}}})
-    _w(home / ".personal" / "claude-memory-mcp.json", {"mcpServers": {"agentmemory": {
+    # cm config: the default folder plus one extra folder holding a hand-made AgentMemory config
+    _w(home / ".claude-launcher" / "config.json", {"mcp_folders": ["~/.claude-launcher/mcps", "~/extra-mcps"]})
+    (home / ".claude-launcher" / "mcps").mkdir(parents=True)
+    _w(home / "extra-mcps" / "claude-memory-mcp.json", {"mcpServers": {"agentmemory": {
         "command": "npx", "args": ["-y", "@agentmemory/mcp"],
         "env": {"AGENTMEMORY_URL": "http://localhost:3111", "AGENTMEMORY_SECRET": MEM_SECRET}}}})
-    _w(home / ".personal" / "claude-memory-settings.json", {"hooks": {
+    _w(home / "extra-mcps" / "claude-memory-settings.json", {"hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "node session-start.mjs"}]}],
         "Stop": [{"hooks": [{"type": "command", "command": "node stop.mjs"}]}],
     }})
-    _w(home / ".config" / "claude-launcher" / "connectors.json", {
+    _w(home / ".claude-launcher" / "connectors.json", {
         "refreshed_at": "2026-10-15T00:00:00+00:00",
         "connectors": [{"name": "claude.ai Slack", "status": "Connected"},
                        {"name": "claude.ai Todoist", "status": "Connected"},
-                       {"name": "claude.ai Interactive Brokers (IBKR)", "status": "Connected"}],
+                       {"name": "claude.ai Acme Analytics (ACME)", "status": "Connected"}],
     })
 
     # fake cmux install

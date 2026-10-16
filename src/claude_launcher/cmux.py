@@ -11,6 +11,7 @@ cm always controls the MCP set itself, so it sets CMUX_COMPUTER_USE_MCP_DISABLED
 server entry to its own session MCP file. The entry is *not* hard-coded here:
 it is read from the installed wrapper's printf template at runtime so it follows
 cmux updates, and cmux is reported unavailable if the template can't be parsed.
+When cmux isn't installed at all (e.g. on Linux) the cmux group is hidden.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class CmuxStatus:
     token_source: str | None = None  # "file" | "env" | None
     template: str | None = None
     arg_names: list[str] = field(default_factory=list)
+    installed: bool = False  # cmux's wrapper exists; False -> cm hides the cmux group entirely
 
 
 def in_cmux(env: dict[str, str]) -> bool:
@@ -112,6 +114,7 @@ def probe(env: dict[str, str]) -> CmuxStatus:
         st.reason = "cmux-claude-wrapper not found (cmux not installed?)"
         return st
     st.wrapper = wrapper
+    st.installed = True
     client = wrapper.parent / "cmux-cua"
     if not os.access(client, os.X_OK):
         st.reason = f"bundled cmux-cua client missing next to {wrapper.name}"

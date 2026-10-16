@@ -33,7 +33,7 @@ def test_connectors_flag(fake_home, launched):
     run("--connectors", "Slack,todoist")
     assert launched[-1].connectors == ["claude.ai Slack", "claude.ai Todoist"]
     run("--connectors", "all")
-    assert set(launched[-1].connectors) == {"claude.ai Slack", "claude.ai Todoist", "claude.ai Interactive Brokers (IBKR)"}
+    assert set(launched[-1].connectors) == {"claude.ai Slack", "claude.ai Todoist", "claude.ai Acme Analytics (ACME)"}
     run("--connectors", "none")
     assert launched[-1].connectors == []
 
@@ -161,3 +161,17 @@ def test_refresh_does_not_swallow_dry_run_or_save_profile(fake_home, monkeypatch
     assert calls and "Isolation:" in out  # the preview was printed, not skipped
     assert profiles.list_profiles() == ["after-refresh"] and not launched
     assert run("--refresh") == 0 and not launched  # refresh alone still just refreshes
+
+
+def test_interactive_path_does_not_wait_for_claude_version(fake_home, monkeypatch, launched):
+    import claude_launcher.tui as tui
+    from claude_launcher import compat
+
+    def slow(claude_bin):
+        raise AssertionError("`claude --version` must not run before the screen opens")
+
+    monkeypatch.setattr(compat, "check", slow)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(tui, "run_tui", lambda cat, sel, **kw: None)
+    assert run() == 0

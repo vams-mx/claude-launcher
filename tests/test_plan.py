@@ -53,7 +53,7 @@ def test_single_connector_uses_denylist(catalog):
     assert not any(a.startswith("--mcp-config") for a in p.argv)  # nothing local selected
     denied = {d["serverName"] for d in p.settings_doc["deniedMcpServers"]}
     assert "claude.ai Todoist" not in denied
-    assert {"claude.ai Slack", "claude.ai Gmail", "claude.ai Interactive Brokers (IBKR)",
+    assert {"claude.ai Slack", "claude.ai Gmail", "claude.ai Acme Analytics (ACME)",
             "gdrive", "agentmemory", "projlocal", "teamsrv", "userwide", "cmux-cua",
             "plugin:dbtools:db"} <= denied
     assert "disableClaudeAiConnectors" not in p.settings_doc
@@ -87,9 +87,9 @@ def test_plugin_with_mcp_switches_to_denylist(catalog):
 
 
 def test_plugins_explicit_true_false(catalog):
-    p = plan_for(catalog, plugins=["prompt-tools@vams"])
+    p = plan_for(catalog, plugins=["prompt-tools@market"])
     assert p.settings_doc["enabledPlugins"] == {
-        "commit-commands@official": False, "dbtools@x": False, "prompt-tools@vams": True}
+        "commit-commands@official": False, "dbtools@x": False, "prompt-tools@market": True}
 
 
 def test_model_permissions_session_and_passthrough(catalog):

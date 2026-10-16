@@ -18,8 +18,10 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection as Item
 
+from . import compat, health, profiles
+from . import config as config_mod
+from . import themes
 from . import costs as costs_mod
-from . import health, profiles
 from .catalog import Catalog, Connector, discover_connectors, refresh_connectors
 from .plan import PlanError, Selection
 from .preview import preview_plan, render
@@ -59,6 +61,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         Binding("ctrl+s", "focus_save", "Save profile"),
         Binding("ctrl+r", "refresh_connectors", "Refresh connectors"),
         Binding("ctrl+n", "select_none", "Clear all"),
+        Binding("ctrl+t", "cycle_theme", "Theme"),
     ]
 
     def __init__(self, cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
@@ -73,6 +76,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.health: dict[str, str] = {}
         self.plan_ok = True
         self.refresh_on_start = auto_refresh
+        for t in themes.CUSTOM:
+            self.register_theme(t)
+        self.theme = self._configured_theme()
 
     # ------------------------------------------------------------------ layout
     def compose(self) -> ComposeResult:
@@ -86,8 +92,10 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                 yield Static(self._connector_note(), classes="note", id="conn_note")
                 yield Label("Plugins", classes="group")
                 yield SelectionList(*self._plugin_items(), id="plugins")
-                yield Label("cmux computer use", classes="group")
-                yield SelectionList(*self._cmux_items(), id="cmux")
+                # hidden entirely where cmux isn't installed (e.g. Linux)
+                for w in (Label("cmux computer use", classes="group"), SelectionList(*self._cmux_items(), id="cmux")):
+                    w.display = self.cat.cmux.installed
+                    yield w
             with VerticalScroll(id="right"):
                 yield Label("Model", classes="group")
                 with RadioSet(id="model"):
@@ -116,7 +124,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     yield Button("Delete", id="delete", variant="error")
                 yield Static(self._default_line(), classes="note", id="default_line")
         yield Static(id="preview")
-        yield Static("Space toggle · Enter launch · Tab next · Ctrl+S save profile · Ctrl+R refresh connectors · Esc quit",
+        yield Static("Space toggle · Enter launch · Tab next · Ctrl+S save profile · Ctrl+R refresh connectors · Ctrl+T theme · Esc quit",
                      id="hint")
         yield Footer()
 
@@ -128,12 +136,34 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         for n in self.notes:
             self.notify(n, severity="warning", timeout=6)
         self._check_health()
+        self._check_version()
+        self.theme_changed_signal.subscribe(self, self._on_theme_changed)
         if self.refresh_on_start:
             self.action_refresh_connectors()
 
     # ------------------------------------------------------------------ items
+    def _palette(self) -> dict[str, str]:
+        """Colour roles for item and preview text, taken from the current theme."""
+        th = self.current_theme
+        return {"cmd": th.primary, "ok": th.success or "green", "warn": th.warning or "yellow",
+                "bad": th.error or "red", "cost": th.secondary or th.primary}
+
+    def _restyle(self) -> None:
+        """Rebuild the rows and the preview so their colours follow a theme change."""
+        self.sel = self._read_selection()
+        for wid, items in (("local", self._local_items), ("connectors", self._connector_items),
+                           ("plugins", self._plugin_items), ("cmux", self._cmux_items)):
+            sl = self.query_one(f"#{wid}", SelectionList)
+            highlighted = sl.highlighted
+            sl.clear_options()
+            sl.add_options(items())
+            if highlighted is not None:
+                sl.highlighted = highlighted
+        self.query_one("#conn_note", Static).update(self._connector_note())
+        self._update_preview()
+
     def _cost(self, key: str) -> Text:
-        return Text("  " + costs_mod.fmt(self.costs.get(key)), style="magenta" if key in self.costs else "dim")
+        return Text("  " + costs_mod.fmt(self.costs.get(key)), style=self._palette()["cost"] if key in self.costs else "dim")
 
     def _local_items(self) -> list[Item]:
         items = []
@@ -141,10 +171,10 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             t = Text(s.name, style="bold")
             t.append_text(self._cost(s.key))
             if s.settings_path:
-                t.append("  +hooks", style="green")
+                t.append("  +hooks", style=self._palette()["ok"])
             if s.name in self.health:
                 h = self.health[s.name]
-                t.append(f"  {h}", style="green" if h == "backend up" else "red")
+                t.append(f"  {h}", style=self._palette()["ok" if h == "backend up" else "bad"])
             t.append(f"  {s.summary()}", style="dim")
             t.append(f"  [{s.source}]", style="dim italic")
             items.append(Item(t, s.name, s.name in self.sel.local))
@@ -163,7 +193,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             t = Text(c.short, style="bold" if c.verified else "dim")
             t.append_text(self._cost(c.key))
             if c.status:
-                t.append(f"  {c.status}", style="dim" if c.verified else "yellow")
+                t.append(f"  {c.status}", style="dim" if c.verified else self._palette()["warn"])
             items.append(Item(t, c.name, c.name in self.sel.connectors))
         if not items:
             items.append(Item(Text("none known: press Ctrl+R to refresh", style="dim"), "__none__", False, disabled=True))
@@ -175,7 +205,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         if self.cat.connectors_refreshed_at:
             t.append(f"  List refreshed {self.cat.connectors_refreshed_at}.", style="dim")
         else:
-            t.append("  List not refreshed yet (Ctrl+R).", style="yellow")
+            t.append("  List not refreshed yet (Ctrl+R).", style=self._palette()["warn"])
         return t
 
     def _plugin_items(self) -> list[Item]:
@@ -184,7 +214,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             t = Text(p.name, style="bold")
             t.append_text(self._cost(p.key))
             if p.mcp_servers:
-                t.append(f"  +{len(p.mcp_servers)} MCP", style="yellow")
+                t.append(f"  +{len(p.mcp_servers)} MCP", style=self._palette()["warn"])
             t.append(f"  {p.id.split('@', 1)[-1]}  [{'/'.join(p.enabled_in)}]", style="dim")
             items.append(Item(t, p.id, p.id in self.sel.plugins))
         if not items:
@@ -197,7 +227,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         t.append_text(self._cost("cmux"))
         t.append("  computer use via cmux's bundled helper", style="dim")
         if st.reason:
-            t.append(f"  ({st.reason})", style="yellow" if st.available else "red")
+            t.append(f"  ({st.reason})", style=self._palette()["warn" if st.available else "bad"])
         return [Item(t, "cmux", self.sel.cmux and st.available, disabled=not st.available)]
 
     def _default_line(self) -> Text:
@@ -240,11 +270,11 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         except PlanError as exc:
             self.plan_ok = False
             pv.add_class("error")
-            pv.update(Text(f"Cannot launch: {exc}", style="bold red"))
+            pv.update(Text(f"Cannot launch: {exc}", style=f"bold {self._palette()['bad']}"))
             return
         self.plan_ok = True
         pv.remove_class("error")
-        pv.update(render(self.cat, self.sel, plan, self.costs))
+        pv.update(render(self.cat, self.sel, plan, self.costs, self._palette()))
 
     def _sync_resume_visibility(self) -> None:
         self.query_one("#resume_id", Input).display = self._read_selection().session == "resume"
@@ -352,6 +382,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
     # ------------------------------------------------------------------ actions
     def action_launch(self) -> None:
+        if len(self.screen_stack) > 1:
+            # A modal screen (e.g. the Ctrl+P command palette) is on top: Enter belongs to it.
+            raise SkipAction()
         focused = self.focused
         if isinstance(focused, Input):
             if focused.id == "profile_name":
@@ -382,6 +415,26 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     def action_focus_save(self) -> None:
         self.query_one("#profile_name", Input).focus()
 
+    def _configured_theme(self) -> str:
+        name = config_mod.load_config().get("theme") or themes.DEFAULT_THEME
+        if not isinstance(name, str) or name not in self.available_themes:
+            self.notes.append(f"unknown theme {name!r} in config.json; using {themes.DEFAULT_THEME}")
+            return themes.DEFAULT_THEME
+        return name
+
+    def action_cycle_theme(self) -> None:
+        self.theme = themes.next_theme(self.theme)
+
+    def _on_theme_changed(self, theme) -> None:
+        """Any theme change (Ctrl+T or the command palette) recolours the rows and is saved."""
+        self._restyle()
+        try:
+            config_mod.save_config({"theme": theme.name})
+        except (OSError, config_mod.ConfigError) as exc:
+            self.notify(f"theme {theme.name} (not saved: {exc})", severity="warning")
+            return
+        self.notify(f"theme: {theme.name}", timeout=2)
+
     def action_select_none(self) -> None:
         for wid in ("local", "connectors", "plugins", "cmux"):
             self.query_one(f"#{wid}", SelectionList).deselect_all()
@@ -409,6 +462,12 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             self.notify(w, severity="warning")
         self._update_preview()
         self.notify(f"{len(self.cat.connectors)} connectors")
+
+    @work(thread=True, exclusive=True, group="version")
+    def _check_version(self) -> None:
+        # `claude --version` is a process (up to 5 s): keep it off the startup path
+        if w := compat.check(self.claude_bin):
+            self.call_from_thread(self.notify, w, severity="warning", timeout=6)
 
     @work(thread=True, exclusive=True, group="health")
     def _check_health(self) -> None:

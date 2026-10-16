@@ -7,7 +7,7 @@ from claude_launcher.catalog import discover, parse_mcp_list, refresh_connectors
 def test_local_servers_all_sources(catalog, fake_home):
     by = {s.name: s for s in catalog.local}
     assert set(by) == {"agentmemory", "gdrive", "projlocal", "teamsrv", "userwide"}
-    assert by["agentmemory"].source.startswith("file:~/.personal/claude-memory-mcp.json")
+    assert by["agentmemory"].source.startswith("file:~/extra-mcps/claude-memory-mcp.json")
     assert by["agentmemory"].settings_path.name == "claude-memory-settings.json"
     assert by["projlocal"].source == "local (this project)"
     assert by["teamsrv"].source.startswith("project:")
@@ -27,16 +27,15 @@ def test_summary_redacts(catalog):
 
 
 def test_settings_files_without_mcpservers_are_ignored(fake_home):
-    (fake_home.home / ".personal" / "notes.json").write_text(json.dumps({"foo": 1}))
-    (fake_home.home / ".personal" / "broken.json").write_text("{nope")
+    (fake_home.home / "extra-mcps" / "notes.json").write_text(json.dumps({"foo": 1}))
+    (fake_home.home / "extra-mcps" / "broken.json").write_text("{nope")
     cat = discover(fake_home.project)
     assert "foo" not in {s.name for s in cat.local}
     assert any("broken.json" in w for w in cat.warnings)
 
 
 def test_user_folder_and_x_cm_metadata(fake_home):
-    d = fake_home.home / ".personal" / "claude-mcps"
-    d.mkdir(parents=True)
+    d = fake_home.home / ".claude-launcher" / "mcps"
     hooks = d / "hooks-for-search.json"
     hooks.write_text(json.dumps({"hooks": {"Stop": []}}))
     (d / "search.json").write_text(json.dumps({
@@ -49,8 +48,7 @@ def test_user_folder_and_x_cm_metadata(fake_home):
 
 
 def test_duplicate_name_first_wins(fake_home):
-    d = fake_home.home / ".personal" / "claude-mcps"
-    d.mkdir(parents=True)
+    d = fake_home.home / ".claude-launcher" / "mcps"
     (d / "g.json").write_text(json.dumps({"mcpServers": {"gdrive": {"command": "other"}}}))
     cat = discover(fake_home.project)
     g = cat.local_by_name("gdrive")
@@ -61,18 +59,18 @@ def test_connectors_cache_plus_ever_connected(catalog):
     by = {c.short: c for c in catalog.connectors}
     assert by["Slack"].verified and by["Todoist"].verified
     assert not by["Gmail"].verified  # only in claudeAiMcpEverConnected
-    assert by["Interactive Brokers (IBKR)"].tool_prefix == "mcp__claude_ai_Interactive_Brokers_IBKR__"
+    assert by["Acme Analytics (ACME)"].tool_prefix == "mcp__claude_ai_Acme_Analytics_ACME__"
 
 
 def test_resolve_connectors(catalog):
-    found, missing = catalog.resolve_connectors(["slack", "claude.ai Todoist", "IBKR", "nope"])
-    assert found == ["claude.ai Slack", "claude.ai Todoist", "claude.ai Interactive Brokers (IBKR)"]
+    found, missing = catalog.resolve_connectors(["slack", "claude.ai Todoist", "ACME", "nope"])
+    assert found == ["claude.ai Slack", "claude.ai Todoist", "claude.ai Acme Analytics (ACME)"]
     assert missing == ["nope"]
 
 
 def test_plugins(catalog):
     by = {p.id: p for p in catalog.plugins}
-    assert set(by) == {"commit-commands@official", "prompt-tools@vams", "dbtools@x"}  # old@x is disabled
+    assert set(by) == {"commit-commands@official", "prompt-tools@market", "dbtools@x"}  # old@x is disabled
     assert by["dbtools@x"].enabled_in == ["local"]
     assert by["dbtools@x"].mcp_servers == ["plugin:dbtools:db"]
 
@@ -85,13 +83,13 @@ def test_parse_mcp_list():
     out = """Checking MCP server health…
 
 claude.ai Claude Docs: https://x/mcp - ✔ Connected
-claude.ai Interactive Brokers (IBKR): https://y/mcp - ✘ Failed to connect
+claude.ai Acme Analytics (ACME): https://y/mcp - ✘ Failed to connect
 gdrive: npx -y @modelcontextprotocol/server-gdrive - ✔ Connected
 claude.ai Gmail: https://z - ! Needs authentication
 """
     assert parse_mcp_list(out) == [
         ("claude.ai Claude Docs", "Connected"),
-        ("claude.ai Interactive Brokers (IBKR)", "Failed to connect"),
+        ("claude.ai Acme Analytics (ACME)", "Failed to connect"),
         ("claude.ai Gmail", "Needs authentication"),
     ]
 
@@ -107,7 +105,7 @@ def test_refresh_connectors_uses_temp_cwd_and_writes_cache(fake_home):
     assert found == [("claude.ai Slack", "Connected")]
     assert seen["cmd"] == ["claude", "mcp", "list"]
     assert str(fake_home.project) not in seen["cwd"]
-    cache = json.loads((fake_home.home / ".config/claude-launcher/connectors.json").read_text())
+    cache = json.loads((fake_home.home / ".claude-launcher/connectors.json").read_text())
     assert cache["connectors"] == [{"name": "claude.ai Slack", "status": "Connected"}]
 
 

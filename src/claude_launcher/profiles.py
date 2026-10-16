@@ -1,4 +1,5 @@
-"""Named profiles in ~/.config/claude-launcher/profiles/<name>.json."""
+"""Named profiles in ~/.claude-launcher/profiles/<name>.json; the default one is
+`default_profile` in ~/.claude-launcher/config.json."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import os
 import re
 from pathlib import Path
 
+from . import config as cfg_mod
 from .catalog import Catalog
 from .paths import config_dir
 from .plan import Selection
@@ -68,30 +70,18 @@ def delete(name: str) -> None:
         set_default(None)
 
 
-def _settings_path() -> Path:
-    return config_dir() / "config.json"
-
-
-def _read_settings() -> dict:
-    try:
-        return json.loads(_settings_path().read_text())
-    except (OSError, ValueError):
-        return {}
-
-
 def get_default() -> str | None:
-    name = _read_settings().get("default_profile")
+    name = cfg_mod.load_config().get("default_profile")
     return name if isinstance(name, str) and name in list_profiles() else None
 
 
 def set_default(name: str | None) -> None:
     if name is not None and name not in list_profiles():
         raise ProfileError(f"no profile named {name!r}")
-    s = _read_settings()
-    s["default_profile"] = name
-    p = _settings_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(s, indent=2) + "\n")
+    try:
+        cfg_mod.save_config({"default_profile": name})
+    except cfg_mod.ConfigError as exc:
+        raise ProfileError(str(exc)) from None
 
 
 def reconcile(sel: Selection, cat: Catalog) -> tuple[Selection, list[str]]:
@@ -105,6 +95,6 @@ def reconcile(sel: Selection, cat: Catalog) -> tuple[Selection, list[str]]:
     notes += [f"plugin {m!r} not enabled/installed here" for m in miss]
     cmux = sel.cmux and cat.cmux.available
     if sel.cmux and not cmux:
-        notes.append(f"cmux unavailable: {cat.cmux.reason}")
+        notes.append("cmux is not installed here" if not cat.cmux.installed else f"cmux unavailable: {cat.cmux.reason}")
     out = Selection.from_dict({**sel.to_dict(), "local": local, "connectors": conns, "plugins": plugins, "cmux": cmux})
     return out, notes

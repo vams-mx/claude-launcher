@@ -1,8 +1,8 @@
 """Read-only discovery of everything cm can switch on or off.
 
 Sources (never written to):
-  * cm user folders (default ~/.personal/claude-mcps and ~/.personal): any
-    *.json with a top-level "mcpServers" object. A companion settings file
+  * `sources` and `mcp_folders` from ~/.claude-launcher/config.json (default
+    folder ~/.claude-launcher/mcps): any *.json with a top-level "mcpServers" object. A companion settings file
     with hooks is picked up as `<stem>.settings.json` or, for
     `<base>-mcp.json`, `<base>-settings.json`; it is loaded only when one of
     that file's servers is selected.
@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import cmux as cmux_mod
-from .paths import claude_dir, claude_json, config_dir, default_mcp_folders, expand, managed_dir
+from . import config as cfg_mod
+from .paths import claude_dir, claude_json, config_dir, expand, managed_dir, tilde
 
 CONNECTOR_PREFIX = "claude.ai "
 
@@ -110,6 +111,8 @@ class Catalog:
     plugins: list[Plugin] = field(default_factory=list)
     cmux: cmux_mod.CmuxStatus = field(default_factory=lambda: cmux_mod.CmuxStatus(False, "not probed"))
     other_server_names: set[str] = field(default_factory=set)  # e.g. managed, never selectable
+    mcp_folders: list[Path] = field(default_factory=list)  # folders scanned, in order
+    source_files: list[Path] = field(default_factory=list)  # explicit `sources` files
     connectors_refreshed_at: str | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -125,7 +128,7 @@ class Catalog:
         return found, missing
 
     def resolve_connectors(self, names: list[str]) -> tuple[list[str], list[str]]:
-        """Accept 'Slack', 'claude.ai Slack', 'slack', or a unique substring ('IBKR')."""
+        """Accept 'Slack', 'claude.ai Slack', 'slack', or a unique substring ('ACME')."""
         found, missing = [], []
         for raw in names:
             n = raw.strip()
@@ -176,14 +179,6 @@ def _read_json(path: Path, warnings: list[str] | None = None) -> Any:
         return None
 
 
-def _tilde(p: Path) -> str:
-    h = str(Path(os.environ.get("HOME", "~")))
-    s = str(p)
-    if h and s == h:
-        return "~"
-    return "~" + s[len(h):] if h and s.startswith(h + "/") else s
-
-
 def _companion_settings(f: Path) -> Path | None:
     cands = [f.with_name(f.stem + ".settings.json")]
     if f.stem.endswith("-mcp"):
@@ -199,16 +194,14 @@ def _project_root(cwd: Path) -> Path:
     return cwd
 
 
-def load_cm_config() -> dict[str, Any]:
-    return _read_json(config_dir() / "catalog.json") or {}
-
-
 # ---------------------------------------------------------------------------
 # discovery
 
 
-def discover_local(cwd: Path, warnings: list[str]) -> tuple[list[LocalServer], set[str]]:
-    cfg = load_cm_config()
+def discover_local(cwd: Path, warnings: list[str], scanned: dict[str, list[Path]] | None = None
+                   ) -> tuple[list[LocalServer], set[str]]:
+    cfg = cfg_mod.load_config(warnings)
+    scanned = {} if scanned is None else scanned
     servers: dict[str, LocalServer] = {}
     other: set[str] = set()
 
@@ -221,16 +214,22 @@ def discover_local(cwd: Path, warnings: list[str]) -> tuple[list[LocalServer], s
             return
         servers[name] = LocalServer(name, conf, source, settings, desc)
 
-    # 1. explicit sources from ~/.config/claude-launcher/catalog.json
-    for src in cfg.get("sources", []):
-        f = expand(src.get("mcp_config", ""))
+    # 1. explicit sources from ~/.claude-launcher/config.json
+    scanned["sources"] = []
+    for src in cfg_mod.sources(cfg):
+        f = expand(src["mcp_config"])
+        scanned["sources"].append(f)
+        if not f.is_file():
+            warnings.append(f"source {tilde(f)} not found")
+            continue
         doc = _read_json(f, warnings) or {}
         st = expand(src["settings"]) if src.get("settings") else _companion_settings(f)
         for n, c in (doc.get("mcpServers") or {}).items():
-            add(n, c, f"file:{_tilde(f)}", st, src.get("description", ""))
+            add(n, c, f"file:{tilde(f)}", st, src.get("description", ""))
 
     # 2. user folders
-    folders = [expand(p) for p in cfg.get("mcp_folders", [])] or default_mcp_folders()
+    folders = cfg_mod.mcp_folders(cfg)
+    scanned["folders"] = folders
     for folder in folders:
         if not folder.is_dir():
             continue
@@ -243,7 +242,7 @@ def discover_local(cwd: Path, warnings: list[str]) -> tuple[list[LocalServer], s
             meta = doc.get("x-cm") or {}
             st = expand(meta["settings"]) if meta.get("settings") else _companion_settings(f)
             for n, c in doc["mcpServers"].items():
-                add(n, c, f"file:{_tilde(f)}", st, meta.get("description", ""))
+                add(n, c, f"file:{tilde(f)}", st, meta.get("description", ""))
 
     # 3. ~/.claude.json local scope (current project first), project .mcp.json, user scope
     cj = _read_json(claude_json(), warnings) or {}
@@ -256,14 +255,14 @@ def discover_local(cwd: Path, warnings: list[str]) -> tuple[list[LocalServer], s
     for d in dict.fromkeys([cwd, root]):
         doc = _read_json(d / ".mcp.json", warnings) or {}
         for n, c in (doc.get("mcpServers") or {}).items():
-            add(n, c, f"project:{_tilde(d / '.mcp.json')}")
+            add(n, c, f"project:{tilde(d / '.mcp.json')}")
     for n, c in (cj.get("mcpServers") or {}).items():
         add(n, c, "user (~/.claude.json)")
     for p, pv in projects.items():
         if p == cwd_s or not isinstance(pv, dict):
             continue
         for n, c in (pv.get("mcpServers") or {}).items():
-            add(n, c, f"local:{_tilde(Path(p))}")
+            add(n, c, f"local:{tilde(Path(p))}")
 
     # 4. managed servers: names only (deny list), never selectable
     md = managed_dir()
@@ -389,7 +388,9 @@ def _plugin_mcp_servers(pid: str, path: Path | None) -> list[str]:
 
 
 def _sideload_disabled() -> bool:
-    for f in [managed_dir() / "managed-settings.json"]:
+    md = managed_dir()  # /Library/Application Support/ClaudeCode (macOS) or /etc/claude-code (Linux)
+    dropins = sorted((md / "managed-settings.d").glob("*.json")) if (md / "managed-settings.d").is_dir() else []
+    for f in [md / "managed-settings.json", *dropins]:
         doc = _read_json(f) or {}
         if doc.get("disableSideloadFlags") is True:
             return True
@@ -400,7 +401,9 @@ def discover(cwd: Path | None = None, env: dict[str, str] | None = None) -> Cata
     cwd = (cwd or Path.cwd()).resolve()
     env = dict(os.environ) if env is None else env
     cat = Catalog(cwd=cwd)
-    cat.local, cat.other_server_names = discover_local(cwd, cat.warnings)
+    scanned: dict[str, list[Path]] = {}
+    cat.local, cat.other_server_names = discover_local(cwd, cat.warnings, scanned)
+    cat.mcp_folders, cat.source_files = scanned.get("folders", []), scanned.get("sources", [])
     cat.connectors, cat.connectors_refreshed_at = discover_connectors(cat.warnings)
     cat.plugins = discover_plugins(cwd, cat.warnings)
     cat.cmux = cmux_mod.probe(env)

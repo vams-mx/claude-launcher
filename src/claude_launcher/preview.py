@@ -37,15 +37,21 @@ def cost_summary(cat: Catalog, sel: Selection, costs: dict[str, costs_mod.Cost])
     return s, missing
 
 
-def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost]) -> Text:
+# Colour roles; the screen passes its theme's colours instead (tui.LauncherApp._palette).
+DEFAULT_PALETTE = {"cmd": "cyan", "ok": "green", "warn": "yellow", "bad": "red", "cost": "magenta"}
+
+
+def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost],
+           palette: dict[str, str] | None = None) -> Text:
+    c = palette or DEFAULT_PALETTE
     t = Text()
     t.append("Command\n", style="bold")
     t.append("  " + env_line(plan) + " \\\n  ", style="dim")
-    t.append(shell_join(plan.argv) + "\n", style="cyan")
+    t.append(shell_join(plan.argv) + "\n", style=c["cmd"])
     mode = "strict (--strict-mcp-config: only listed servers)" if plan.mode == "strict" else \
         "deny-list (connectors selected; everything else blocked by name)"
     t.append("Isolation: ", style="bold")
-    t.append(mode + "\n", style="green" if plan.mode == "strict" else "yellow")
+    t.append(mode + "\n", style=c["ok"] if plan.mode == "strict" else c["warn"])
 
     servers = list(plan.mcp_doc["mcpServers"]) + [c for c in sel.connectors]
     t.append("Loads: ", style="bold")
@@ -70,9 +76,9 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
         t.append(f"  (+ {len(missing)} not measured: {', '.join(missing)} → cm --measure)", style="dim")
     t.append("\n")
     if sel.permissions == "skip":
-        t.append("⚠ --dangerously-skip-permissions: Claude will run tools without asking\n", style="bold red")
+        t.append("⚠ --dangerously-skip-permissions: Claude will run tools without asking\n", style=f"bold {c['bad']}")
     for w in plan.warnings:
-        t.append(f"• {w}\n", style="yellow")
+        t.append(f"• {w}\n", style=c["warn"])
     return t
 
 

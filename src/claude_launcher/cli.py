@@ -5,8 +5,10 @@
   cm --mcp agentmemory,gdrive     choose local MCP servers
   cm --connectors none|all|Slack,Todoist
   cm --plugins none|all|commit-commands
-  cm --cmux / --no-mcp / --list / --continue / --resume [id]
+  cm --cmux / --no-mcp / --list / --where / --continue / --resume [id]
   cm ... -- <args forwarded verbatim to claude>
+  cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
+  cm setup agentmemory            install and wire up AgentMemory (opt-in, asks first)
 """
 
 from __future__ import annotations
@@ -18,10 +20,12 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, compat
+from . import config as cfg_mod
 from . import costs as costs_mod
 from . import profiles
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
+from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
 from .plan import MODELS, PlanError, Selection
 from .preview import plain, preview_plan
@@ -46,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cm",
         description="Start Claude Code with exactly the MCP servers, claude.ai connectors, plugins and "
                     "cmux computer use you choose. Without selection flags, opens the interactive screen.",
-        epilog="Arguments after `--` are forwarded verbatim to claude.",
+        epilog="Arguments after `--` are forwarded verbatim to claude. "
+               "Setup: `cm setup init`, `cm setup agentmemory` (see `cm setup --help`).",
     )
     sel = p.add_argument_group("selection (any of these skips the interactive screen)")
     sel.add_argument("--profile", metavar="NAME", help="start from a saved profile")
@@ -67,7 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     info = p.add_argument_group("catalog, profiles and costs")
     info.add_argument("-l", "--list", action="store_true", help="show everything that can be selected")
-    info.add_argument("--json", action="store_true", help="with --list or --dry-run: machine-readable output")
+    info.add_argument("--where", action="store_true",
+                      help="show the config home, the MCP folders scanned and the file each server came from")
+    info.add_argument("--json", action="store_true", help="with --list, --where or --dry-run: machine-readable output")
     info.add_argument("-n", "--dry-run", action="store_true", help="print the launch preview, don't start claude")
     info.add_argument("--refresh", action="store_true", help="refresh the claude.ai connector list (claude mcp list)")
     info.add_argument("--measure", nargs="?", const="all", metavar="KEYS",
@@ -151,8 +158,9 @@ def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str
     return sel, notes
 
 
-def print_list(cat: Catalog, as_json: bool) -> None:
+def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> None:
     costs = costs_mod.load()
+    notes = list(notes or [])
     if as_json:
         doc = {
             "cwd": str(cat.cwd),
@@ -164,10 +172,11 @@ def print_list(cat: Catalog, as_json: bool) -> None:
             "connectors_refreshed_at": cat.connectors_refreshed_at,
             "plugins": [{"id": p.id, "enabled_in": p.enabled_in, "mcp_servers": p.mcp_servers,
                          "cost": vars(costs[p.key]) if p.key in costs else None} for p in cat.plugins],
-            "cmux": {"available": cat.cmux.available, "note": cat.cmux.reason, "in_cmux": cat.cmux.in_cmux,
+            "cmux": {"installed": cat.cmux.installed, "available": cat.cmux.available, "note": cat.cmux.reason,
+                     "in_cmux": cat.cmux.in_cmux,
                      "token": cat.cmux.token_source, "cost": vars(costs["cmux"]) if "cmux" in costs else None},
             "profiles": profiles.list_profiles(), "default_profile": profiles.get_default(),
-            "warnings": cat.warnings,
+            "warnings": cat.warnings + notes,
         }
         print(json.dumps(doc, indent=2))
         return
@@ -195,20 +204,140 @@ def print_list(cat: Catalog, as_json: bool) -> None:
         t.add_row("plugin", p.id, "enabled in: " + "/".join(p.enabled_in) +
                   (f" · MCP: {', '.join(p.mcp_servers)}" if p.mcp_servers else ""), costs_mod.fmt(costs.get(p.key)))
     st = cat.cmux
-    t.add_row("cmux", "cmux-cua", ("available" if st.available else "unavailable") +
-              (f" · {st.reason}" if st.reason else ""), costs_mod.fmt(costs.get("cmux")))
+    if st.installed:  # no cmux row at all where cmux isn't installed
+        t.add_row("cmux", "cmux-cua", ("available" if st.available else "unavailable") +
+                  (f" · {st.reason}" if st.reason else ""), costs_mod.fmt(costs.get("cmux")))
     con.print(t)
     refreshed = cat.connectors_refreshed_at or "never (run cm --refresh)"
     con.print(f"[dim]connectors refreshed: {refreshed} · profiles: {', '.join(profiles.list_profiles()) or 'none'}"
               f" · default: {profiles.get_default() or 'none'}[/dim]")
+    for w in cat.warnings + notes:
+        con.print(f"• {w}", markup=False, style="yellow")
+
+
+def _describe_source(source: str) -> str:
+    if source.startswith(("file:", "project:")):
+        return source.split(":", 1)[1]
+    if source == "local (this project)":
+        return "~/.claude.json (local scope, this project)"
+    if source.startswith("local:"):
+        return f"~/.claude.json (local scope of {source[len('local:'):]})"
+    if source.startswith("user"):
+        return "~/.claude.json (user scope)"
+    return source
+
+
+def _server_files(folder: Path) -> int:
+    n = 0
+    for f in folder.glob("*.json"):
+        if f.name.endswith((".settings.json", "-settings.json")):
+            continue
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        n += isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict)
+    return n
+
+
+def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | None) -> None:
+    """Paths only: never server configs or env values."""
+    legacy = legacy_config_dir()
+    servers = [{"name": s.name, "from": _describe_source(s.source),
+                "settings": tilde(s.settings_path) if s.settings_path else None,
+                "shadowed": [_describe_source(x) for x in s.also_in]} for s in cat.local]
+    folders = [{"path": tilde(f), "exists": f.is_dir(), "server_files": _server_files(f) if f.is_dir() else 0}
+               for f in cat.mcp_folders]
+    doc = {
+        "config_dir": tilde(config_dir()),
+        "config_dir_from": "CM_CONFIG_DIR" if os.environ.get("CM_CONFIG_DIR") else "default",
+        "config_file": tilde(config_file()), "config_file_exists": config_file().is_file(),
+        "legacy_config_dir": tilde(legacy) if legacy.is_dir() else None,
+        "managed_dir": str(managed_dir()),
+        "claude": {"bin": claude_bin, "version": version, "verified_on": list(compat.VERIFIED_VERSIONS),
+                   "warning": compat.version_warning(version)},
+        "mcp_folders": folders, "sources": [tilde(f) for f in cat.source_files], "servers": servers,
+    }
+    if as_json:
+        print(json.dumps(doc, indent=2))
+        return
+    print(f"config home   {doc['config_dir']}" + ("  (from CM_CONFIG_DIR)" if doc["config_dir_from"] != "default" else ""))
+    print(f"config file   {doc['config_file']}" + ("" if doc["config_file_exists"] else "  (not created yet: cm setup init)"))
+    if doc["legacy_config_dir"]:
+        print(f"old home      {doc['legacy_config_dir']}  (no longer read; safe to delete once you're happy)")
+    print(f"managed dir   {doc['managed_dir']}")
+    print(f"claude        {claude_bin} ({version or 'version unknown'}; control matrix verified on "
+          f"{', '.join(compat.VERIFIED_VERSIONS)})")
+    if doc["claude"]["warning"]:
+        print(f"              • {doc['claude']['warning']}")
+    print("\nMCP folders (scanned in order; the first definition of a server name wins)")
+    for i, f in enumerate(folders, 1):
+        state = f"{f['server_files']} server file(s)" if f["exists"] else "missing"
+        print(f"  {i}. {f['path']}  [{state}]")
+    if not folders:
+        print("  (none: mcp_folders is empty)")
+    print("Explicit sources")
+    for f in doc["sources"] or ["(none)"]:
+        print(f"  {f}")
+    print("Servers and where each came from")
+    width = max([len(x["name"]) for x in servers] + [4])
+    for x in servers:
+        extra = f"  + settings {x['settings']}" if x["settings"] else ""
+        print(f"  {x['name']:<{width}}  {x['from']}{extra}")
+        for sh in x["shadowed"]:
+            print(f"  {'':<{width}}  (also defined, ignored: {sh})")
+    if not servers:
+        print("  (none)")
     for w in cat.warnings:
-        con.print(f"[yellow]• {w}[/yellow]")
+        print(f"• {w}")
+
+
+def build_setup_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="cm setup", description="One-time setup steps (safe to re-run).")
+    sub = p.add_subparsers(dest="what", required=True)
+    sub.add_parser("init", help="create the config home with a commented config.json and an empty mcps/ folder "
+                                "(migrates ~/.config/claude-launcher once); never overwrites")
+    am = sub.add_parser("agentmemory", help="install AgentMemory and generate its cm MCP + hooks files",
+                        description="Gated by INSTALL_AGENT_MEMORY (env var, else config.json): unset = ask once, "
+                                    "0 = skip, 1 = run. Every impactful step is confirmed first.")
+    am.add_argument("--from-installer", action="store_true", help=argparse.SUPPRESS)
+    am.add_argument("--no-service", action="store_true", help="don't offer to register a launchd/systemd service")
+    return p
+
+
+def setup_main(argv: list[str]) -> int:
+    a = build_setup_parser().parse_args(argv)
+    if a.what == "init":
+        try:
+            created = cfg_mod.init_home()
+        except OSError as exc:
+            _err(f"setup init failed: {exc}")
+            return 1
+        print(f"cm home {tilde(config_dir())}: " + (("created " + ", ".join(created)) if created else "already set up"))
+        return 0
+    from .agentmemory import run_setup
+
+    if a.from_installer:
+        cfg_mod.init_home()
+    return run_setup(from_installer=a.from_installer, with_service=not a.no_service)
 
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     own, passthrough = _split_passthrough(raw)
-    a = build_parser().parse_args(own)
+    is_setup = own[:1] == ["setup"]
+    a = None if is_setup else build_parser().parse_args(own)
+    try:
+        cfg_mod.migrate_legacy()
+    except OSError as exc:
+        # Stop here: carrying on would let the first state write create the new home,
+        # after which the migration would never be retried.
+        _err(f"could not migrate {tilde(legacy_config_dir())} -> {tilde(config_dir())}: {exc}\n"
+             "    Nothing was changed. Fix the cause and run cm again (or set CM_CONFIG_DIR).")
+        return 1
+    if is_setup:
+        return setup_main(own[1:])
+    assert a is not None
     claude_bin = a.claude_bin or shutil.which("claude") or "claude"
     cwd = Path(a.cwd).resolve() if a.cwd else Path.cwd()
 
@@ -238,13 +367,18 @@ def main(argv: list[str] | None = None) -> int:
             _err(f"refresh failed: {exc}")
             return 1
         print(f"{len(found)} claude.ai connectors: " + ", ".join(n for n, _ in found))
-        if not (a.list or a.measure or a.dry_run or a.interactive or a.save_profile or _selection_flags_given(a)):
+        if not (a.list or a.where or a.measure or a.dry_run or a.interactive or a.save_profile or _selection_flags_given(a)):
             return 0
 
     cat = discover(cwd)
 
+    if a.where:
+        print_where(cat, a.json, claude_bin, compat.installed_version(claude_bin))
+        return 0
+
     if a.list:
-        print_list(cat, a.json)
+        vw = compat.check(claude_bin)
+        print_list(cat, a.json, [vw] if vw else [])
         return 0
 
     if a.measure:
@@ -298,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if a.dry_run:
+        vw = compat.check(claude_bin)
+        if vw:
+            plan.warnings.append(vw)
         if a.json:
             from .preview import env_line
             from .redact import redact_mcp_doc, redact_settings

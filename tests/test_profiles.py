@@ -7,7 +7,7 @@ from claude_launcher.plan import Selection
 def test_save_load_delete_default(fake_home):
     sel = Selection(local=["agentmemory", "gdrive"], model="sonnet", resume_id="should-not-persist")
     path = profiles.save("memory+gdrive", sel)
-    assert path.parent == fake_home.home / ".config/claude-launcher/profiles"
+    assert path.parent == fake_home.home / ".claude-launcher/profiles"
     loaded = profiles.load("memory+gdrive")
     assert loaded.local == ["agentmemory", "gdrive"] and loaded.model == "sonnet" and loaded.resume_id is None
     assert profiles.list_profiles() == ["memory+gdrive"]
@@ -32,10 +32,10 @@ def test_missing(fake_home):
 
 def test_reconcile_drops_vanished_items(catalog):
     sel = Selection(local=["agentmemory", "gone"], connectors=["claude.ai Slack", "claude.ai Vanished"],
-                    plugins=["prompt-tools@vams", "x@y"], cmux=True)
+                    plugins=["prompt-tools@market", "x@y"], cmux=True)
     out, notes = profiles.reconcile(sel, catalog)
     assert out.local == ["agentmemory"] and out.connectors == ["claude.ai Slack"]
-    assert out.plugins == ["prompt-tools@vams"] and out.cmux is True
+    assert out.plugins == ["prompt-tools@market"] and out.cmux is True
     assert len(notes) == 3
 
 
