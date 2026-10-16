@@ -12,6 +12,7 @@ from textual import on, work
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.timer import Timer
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button, Footer, Header, Input, Label, RadioButton, RadioSet, Select, SelectionList, Static,
@@ -30,6 +31,69 @@ MODEL_LABELS = {"default": "Default", "sonnet": "Sonnet", "opus": "Opus", "haiku
 PERM_LABELS = {"standard": "Standard (ask before acting)", "skip": "⚠ Skip permissions (--dangerously-skip-permissions)"}
 SESSION_LABELS = {"new": "New session", "continue": "Continue last (--continue)", "resume": "Resume… (native picker)"}
 
+def _edge(options: list, last: bool) -> int | None:
+    """Index of the first (or last) enabled option, or None if none is enabled."""
+    idx = [i for i, o in enumerate(options) if not o.disabled]
+    return (idx[-1] if last else idx[0]) if idx else None
+
+
+class FlowSelectionList(SelectionList):
+    """Up/Down past the first/last row moves focus to the previous/next box."""
+
+    BINDINGS = [Binding("down", "flow(1)", show=False), Binding("up", "flow(-1)", show=False)]
+
+    def action_flow(self, direction: int) -> None:
+        edge = _edge(self.options, last=direction > 0)
+        if self.highlighted is None or self.highlighted == edge:
+            self.app.flow_focus(direction)
+        elif direction > 0:
+            self.action_cursor_down()
+        else:
+            self.action_cursor_up()
+
+    def enter_from(self, direction: int) -> None:
+        self.highlighted = _edge(self.options, last=direction < 0)
+
+
+class FlowRadioSet(RadioSet):
+    """Like FlowSelectionList, for radio groups (Left/Right still cycle inside).
+
+    Uses RadioSet's private `_selected` (the highlighted button), which Textual 8
+    has; pyproject caps textual below 9 and test_arrows_flow_from_box_to_box fails
+    loudly if it changes."""
+
+    BINDINGS = [Binding("down", "flow(1)", show=False), Binding("up", "flow(-1)", show=False)]
+
+    def action_flow(self, direction: int) -> None:
+        buttons = list(self.query(RadioButton))
+        edge = _edge(buttons, last=direction > 0)
+        if self._selected is None or self._selected == edge:
+            self.app.flow_focus(direction)
+        elif direction > 0:
+            self.action_next_button()
+        else:
+            self.action_previous_button()
+
+    def enter_from(self, direction: int) -> None:
+        self._selected = _edge(list(self.query(RadioButton)), last=direction < 0)
+
+
+class FlowColumn(VerticalScroll):
+    """A scrolling column whose Up/Down move between boxes instead of scrolling it.
+    (Focus changes scroll the focused box into view; PageUp/PageDown still scroll.)"""
+
+    BINDINGS = [Binding("down", "app.flow(1)", show=False), Binding("up", "app.flow(-1)", show=False)]
+
+
+class FlowSelect(Select):
+    """Up/Down move between boxes; Enter or Space opens the list."""
+
+    BINDINGS = [Binding("down", "flow(1)", show=False), Binding("up", "flow(-1)", show=False)]
+
+    def action_flow(self, direction: int) -> None:
+        self.app.flow_focus(direction)
+
+
 CSS = """
 Screen { layout: vertical; }
 #body { height: 1fr; }
@@ -38,9 +102,9 @@ Screen { layout: vertical; }
 .group { margin-top: 1; text-style: bold; color: $accent; }
 .note { color: $text-muted; padding: 0 1; }
 SelectionList { height: auto; max-height: 12; border: round $panel; }
-SelectionList:focus { border: round $accent; }
+SelectionList:focus { border: round $accent; background: $boost; }
 RadioSet { width: 100%; border: round $panel; }
-RadioSet:focus { border: round $accent; }
+RadioSet:focus { border: round $accent; background: $boost; }
 #perm RadioButton.danger { color: $error; }
 #resume_id { margin-top: 0; }
 #profile_row { height: auto; }
@@ -62,6 +126,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         Binding("ctrl+r", "refresh_connectors", "Refresh connectors"),
         Binding("ctrl+n", "select_none", "Clear all"),
         Binding("ctrl+t", "cycle_theme", "Theme"),
+        Binding("down", "flow(1)", show=False),
+        Binding("up", "flow(-1)", show=False),
     ]
 
     def __init__(self, cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
@@ -76,6 +142,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.health: dict[str, str] = {}
         self.plan_ok = True
         self.refresh_on_start = auto_refresh
+        self._armed_delete: str | None = None  # profile name armed by a first Delete press
+        self._disarm_timer: Timer | None = None
         for t in themes.CUSTOM:
             self.register_theme(t)
         self.theme = self._configured_theme()
@@ -84,36 +152,38 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="body"):
-            with VerticalScroll(id="left"):
+            with FlowColumn(id="left") as left:
+                left.can_focus = False  # arrows/Tab go box to box, not to the column
                 yield Label("Local MCP servers", classes="group")
-                yield SelectionList(*self._local_items(), id="local")
+                yield FlowSelectionList(*self._local_items(), id="local")
                 yield Label("claude.ai connectors", classes="group")
-                yield SelectionList(*self._connector_items(), id="connectors")
+                yield FlowSelectionList(*self._connector_items(), id="connectors")
                 yield Static(self._connector_note(), classes="note", id="conn_note")
                 yield Label("Plugins", classes="group")
-                yield SelectionList(*self._plugin_items(), id="plugins")
+                yield FlowSelectionList(*self._plugin_items(), id="plugins")
                 # hidden entirely where cmux isn't installed (e.g. Linux)
-                for w in (Label("cmux computer use", classes="group"), SelectionList(*self._cmux_items(), id="cmux")):
+                for w in (Label("cmux computer use", classes="group"), FlowSelectionList(*self._cmux_items(), id="cmux")):
                     w.display = self.cat.cmux.installed
                     yield w
-            with VerticalScroll(id="right"):
+            with FlowColumn(id="right") as right:
+                right.can_focus = False
                 yield Label("Model", classes="group")
-                with RadioSet(id="model"):
+                with FlowRadioSet(id="model"):
                     for k, v in MODEL_LABELS.items():
                         yield RadioButton(v, value=self.sel.model == k, name=k)
                 yield Label("Permissions", classes="group")
-                with RadioSet(id="perm"):
+                with FlowRadioSet(id="perm"):
                     for k, v in PERM_LABELS.items():
                         yield RadioButton(v, value=self.sel.permissions == k, name=k,
                                           classes="danger" if k == "skip" else "")
                 yield Label("Session", classes="group")
-                with RadioSet(id="session"):
+                with FlowRadioSet(id="session"):
                     for k, v in SESSION_LABELS.items():
                         yield RadioButton(v, value=self.sel.session == k, name=k)
                 yield Input(placeholder="resume: session id (blank = picker)", id="resume_id",
                             value=self.sel.resume_id or "")
                 yield Label("Profile", classes="group")
-                yield Select([(p, p) for p in profiles.list_profiles()], prompt="load profile…",
+                yield FlowSelect([(p, p) for p in profiles.list_profiles()], prompt="load profile…",
                              id="profile", allow_blank=True,
                              value=self.profile_name if self.profile_name in profiles.list_profiles() else Select.NULL)
                 with Horizontal(id="profile_row"):
@@ -124,7 +194,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     yield Button("Delete", id="delete", variant="error")
                 yield Static(self._default_line(), classes="note", id="default_line")
         yield Static(id="preview")
-        yield Static("Space toggle · Enter launch · Tab next · Ctrl+S save profile · Ctrl+R refresh connectors · Ctrl+T theme · Esc quit",
+        yield Static("↑↓ move through all boxes · Space toggle · Enter launch · Ctrl+S save profile · Ctrl+R refresh connectors · Ctrl+T theme · Esc quit",
                      id="hint")
         yield Footer()
 
@@ -364,6 +434,21 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     @on(Button.Pressed, "#delete")
     def _delete(self) -> None:
         name = self.query_one("#profile_name", Input).value.strip()
+        btn = self.query_one("#delete", Button)
+        if not name:
+            self.notify("type a profile name to delete", severity="warning")
+            return
+        if self._armed_delete != name:  # first press only arms it
+            self._armed_delete = name
+            btn.label = "Confirm?"
+            # shown under the buttons, not as a toast: a toast would sit on top of Delete
+            self.query_one("#default_line", Static).update(
+                Text(f"press Delete again within 4 s to delete profile {name!r}", style=self._palette()["warn"]))
+            if self._disarm_timer is not None:
+                self._disarm_timer.stop()  # an older arm must not cut this one short
+            self._disarm_timer = self.set_timer(4, self._disarm_delete)
+            return
+        self._disarm_delete()
         try:
             profiles.delete(name)
         except profiles.ProfileError as exc:
@@ -373,6 +458,14 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self._refresh_profile_select(None)
         self.query_one("#default_line", Static).update(self._default_line())
         self.notify(f"deleted profile {name}")
+
+    def _disarm_delete(self) -> None:
+        if self._disarm_timer is not None:
+            self._disarm_timer.stop()
+            self._disarm_timer = None
+        self._armed_delete = None
+        self.query_one("#delete", Button).label = "Delete"
+        self.query_one("#default_line", Static).update(self._default_line())
 
     def _refresh_profile_select(self, value: str | None) -> None:
         sel = self.query_one("#profile", Select)
@@ -421,6 +514,24 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             self.notes.append(f"unknown theme {name!r} in config.json; using {themes.DEFAULT_THEME}")
             return themes.DEFAULT_THEME
         return name
+
+    def flow_focus(self, direction: int) -> None:
+        """Move focus to the next/previous box, landing on its first/last row.
+        Stops at the ends instead of wrapping (Up at the top must not land on Delete)."""
+        chain = self.screen.focus_chain
+        if chain and self.focused is (chain[-1] if direction > 0 else chain[0]):
+            return
+        if direction > 0:
+            self.screen.focus_next()
+        else:
+            self.screen.focus_previous()
+        if isinstance(self.focused, (FlowSelectionList, FlowRadioSet)):
+            self.focused.enter_from(direction)
+
+    def action_flow(self, direction: int) -> None:
+        if len(self.screen_stack) > 1:
+            raise SkipAction()  # a modal (palette, Select overlay) owns the arrows
+        self.flow_focus(direction)
 
     def action_cycle_theme(self) -> None:
         self.theme = themes.next_theme(self.theme)

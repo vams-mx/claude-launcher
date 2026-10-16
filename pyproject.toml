@@ -16,7 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
-    "textual>=8.0",  # Select.NULL (tui.py) replaced Select.BLANK in 8.0.0
+    "textual>=8.0,<9",  # Select.NULL (8.0+); tui.FlowRadioSet uses RadioSet._selected
     "rich>=13.7",
 ]
 

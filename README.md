@@ -1,33 +1,47 @@
-# cm: start Claude Code with exactly the MCP servers you pick
+<div align="center">
 
-`cm` launches a Claude Code session with the local MCP servers, claude.ai connectors, plugins and (optionally) cmux computer use that you choose **for that session**, and nothing else. Tools you won't use don't take up context, and hooks that belong to a server (for example AgentMemory's) only run when that server is selected.
+# cm
 
+**Launch Claude Code with exactly the MCP servers you pick. No more, no less.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-4A5A6A)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-4A5A6A)](pyproject.toml)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4A5A6A)](#install)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-2.1.281%20verified-4A5A6A)](#how-it-works)
+
+<img src="docs/screenshot.svg" alt="cm's interactive screen: grouped checklists of local MCP servers, claude.ai connectors and plugins, with model, permissions and session options, and a live preview of the exact claude command" width="100%">
+
+</div>
+
+Every MCP server, claude.ai connector and plugin you have configured loads into **every** Claude Code session. Most of them sit there unused, taking up context and adding tools the model has to choose from. `cm` lets you pick what a session gets, then starts `claude` with exactly that and nothing else.
+
+```bash
+cm                                   # pick on a keyboard-driven screen, press Enter
+cm --mcp agentmemory,github          # or headless: just these two servers
 ```
-cm                                   # interactive screen
-cm --mcp agentmemory,github          # headless: just these two local MCP servers (+ their hooks)
-cm --profile memory+github           # a saved profile
-cm --connectors Slack,Linear         # only these claude.ai connectors
-cm --no-mcp --continue               # no MCP at all, continue the last conversation
-cm --resume                          # claude's native resume picker, with your MCP choice
-cm --list                            # everything that can be selected, with measured context cost
-cm --where                           # config home, MCP folders scanned, and where each server came from
-cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchanged
-```
 
-**Platforms:** macOS and Linux. Windows is not supported (the installer refuses to run there).
+## Features
+
+- **Exact selection.** Choose local MCP servers, claude.ai connectors (one by one), plugins and cmux computer use per session. Anything you don't pick doesn't load, and that was verified with real launches.
+- **See the cost first.** Each item shows its measured context cost, and the preview adds up the total before you launch.
+- **Profiles.** Save combinations like `memory+github` or `research`, set a default and override it with flags.
+- **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
+- **Keyboard-first screen.** ↑/↓ flow through every box, Space toggles, Enter launches. Seven sober themes, with WCAG-contrast text.
+- **Scriptable.** Every choice is also a flag, and anything after `--` goes to `claude` unchanged.
+- **Safe by design.** No shell, private temp files, secrets redacted in every preview. It never edits your Claude Code configuration, and your `~/.claude/settings.json` (env, permissions, model…) still applies as usual.
+- **Optional AgentMemory setup.** One command installs [AgentMemory](https://github.com/rohitg00/agentmemory) and wires its MCP server and hooks into cm.
 
 ## Contents
 
-- [Install](#install)
-- [Configuration](#configuration): config home, `mcp_folders`, adding MCP servers, companion settings
-- [The screen](#the-screen) · [Profiles](#profiles) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
+- [Install](#install) · [Usage](#usage) · [The screen](#the-screen) · [Themes](#themes)
+- [Configuration](#configuration) · [Profiles](#profiles) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
-- [How a launch works](#how-a-launch-works) · [Control matrix](#control-matrix) · [Verify on your machine](#verify-on-your-machine)
+- [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
 - [Security](#security) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations) · [Development](#development)
 
 ## Install
 
-You need [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) (`claude` on your PATH). Everything else is handled by the installer.
+You need [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) (`claude` on your PATH). The installer handles everything else. **macOS and Linux** only.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vams-mx/claude-launcher/main/install.sh | sh
@@ -37,8 +51,20 @@ or from a checkout:
 
 ```bash
 git clone https://github.com/vams-mx/claude-launcher && cd claude-launcher
-sh install.sh                  # installs this checkout
+sh install.sh
 ```
+
+Then:
+
+```bash
+cm --refresh      # cache your claude.ai connector list (runs `claude mcp list`)
+cm --where        # see where cm looks for MCP servers
+cm                # pick and launch
+cm --measure      # optional: measure each item's real context cost (cheap Haiku probes, a few cents)
+```
+
+<details>
+<summary><b>What the installer does, options, manual install, uninstall</b></summary>
 
 The installer:
 
@@ -53,16 +79,68 @@ Re-running it is safe: it upgrades cm and never overwrites your configuration. O
 
 Manual install, if you prefer: `uv tool install git+https://github.com/vams-mx/claude-launcher` (or `pipx install …`), then `cm setup init`.
 
-After installing:
+To uninstall: `uv tool uninstall claude-launcher`, then delete `~/.claude-launcher/` if you don't want your profiles any more (and see [removing AgentMemory](#removing-agentmemory)).
+
+</details>
+
+## Usage
 
 ```bash
-cm --refresh      # cache your claude.ai connector list (runs `claude mcp list`)
-cm --where        # see where cm looks for MCP servers
-cm                # pick and launch
-cm --measure      # optional: measure each item's real context cost (cheap Haiku probes, a few cents)
+cm                                   # interactive screen
+cm --mcp agentmemory,github          # headless: just these two local MCP servers (+ their hooks)
+cm --profile memory+github           # a saved profile
+cm --connectors Slack,Linear         # only these claude.ai connectors
+cm --plugins none --model sonnet     # no plugins, Sonnet
+cm --no-mcp --continue               # no MCP at all, continue the last conversation
+cm --resume                          # claude's native resume picker, with your MCP choice
+cm --list                            # everything that can be selected, with measured context cost
+cm --where                           # config home, MCP folders scanned, and where each server came from
+cm --mcp github --dry-run            # print the exact command instead of launching
+cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchanged
 ```
 
-To uninstall: `uv tool uninstall claude-launcher`, then delete `~/.claude-launcher/` if you don't want your profiles any more (and see [removing AgentMemory](#removing-agentmemory)).
+`cm --help` lists every option, and `cm setup --help` lists the setup commands.
+
+## The screen
+
+- **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
+- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume) and **Profiles**.
+- **Bottom:** a live preview of the exact command (secrets redacted), the isolation mode, what will load, the hooks added, the estimated context cost and any warnings.
+
+| key | action |
+|---|---|
+| **↑ / ↓** | move row by row through every box. Past a box's last row you land on the next box. It stops at the top and bottom instead of wrapping. |
+| **Space** | toggle |
+| **Enter** | launch (on the profile list, open it) |
+| **Tab** | jump to the next box |
+| **Ctrl+S** | save the selection as a profile |
+| **Ctrl+R** | refresh the claude.ai connector list |
+| **Ctrl+N** | clear everything |
+| **Ctrl+T** | next theme (saved) |
+| **Ctrl+P** | command palette: *Theme* picks any theme (saved) |
+| **Esc** | quit without launching |
+
+Nothing is selected unless you set a default profile. Deleting a profile needs a second press of Delete within 4 seconds.
+
+## Themes
+
+cm ships seven sober themes of its own. Every text colour keeps a WCAG contrast of at least 4.5:1 against all three backgrounds.
+
+| dark | light |
+|---|---|
+| `cm-graphite` (default): neutral greys, steel-blue accent | `cm-paper`: off-white paper, slate accents |
+| `cm-slate`: cool blue-grey | `cm-sand`: warm beige |
+| `cm-moss`: warm olive-grey | `cm-mist`: cool grey-blue |
+| `cm-ink`: almost monochrome | |
+
+**Ctrl+T** cycles through these and then `nord`, `gruvbox`, `flexoki`, `solarized-light` and `textual-dark`. **Ctrl+P → Theme** offers every built-in Textual theme. Either way the choice is saved as `theme` in `config.json`.
+
+<details>
+<summary><b><code>cm-paper</code> (light)</b></summary>
+
+<img src="docs/screenshot-light.svg" alt="cm's screen in the cm-paper light theme" width="100%">
+
+</details>
 
 ## Configuration
 
@@ -137,31 +215,6 @@ A server file can have a companion Claude Code settings file, typically with `ho
 
 Files named `*.settings.json` or `*-settings.json` are never treated as server files.
 
-## The screen
-
-```
-┌ Local MCP servers ─────────────────────────────┐  Model        (•) Default ( ) Sonnet ( ) Opus ( ) Haiku
-│ [X] agentmemory  ~0.8k tok · 54 tools +hooks … │  Permissions  (•) Standard  ( ) ⚠ Skip permissions
-│ [ ] github       not measured               …  │  Session      (•) New ( ) Continue ( ) Resume…
-├ claude.ai connectors ──────────────────────────┤  Profile      [load profile… ▾]
-│ [ ] Slack        ~0.4k tok · 20 tools Connected │               [memory+github] [Save] [Default] [Delete]
-├ Plugins ───────────────────────────────────────┤
-│ [ ] commit-commands                            │
-└────────────────────────────────────────────────┘
-┌ Command  CMUX_COMPUTER_USE_MCP_DISABLED=1 claude --strict-mcp-config --mcp-config=… --settings …     ┐
-│ Isolation: strict · Loads: agentmemory · Plugins: none · Hooks: 12 events · ~0.8k tokens            │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-(The numbers are illustrative; yours come from `cm --measure`.)
-
-* The left side has grouped checklists: **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them. AgentMemory also gets a non-destructive backend health check (`GET /agentmemory/livez`).
-* The right side has **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume; Resume with no id opens claude's own picker) and **Profiles**.
-* The bottom preview updates live. It shows the exact command (secrets redacted), the isolation mode, what will load, the hooks added, the estimated context cost and any warnings.
-* Keys: **Space** toggles, **Enter** launches, Tab moves between groups, Ctrl+S saves a profile, Ctrl+R refreshes connectors, Ctrl+N clears everything, Ctrl+T switches the colour theme and Ctrl+P → Theme picks any theme (both saved as `theme` in `config.json`), Esc quits.
-
-Nothing is selected unless you set a default profile.
-
 ## Profiles
 
 ```bash
@@ -206,14 +259,6 @@ Inside cmux, `claude` is cmux's wrapper. Unless told otherwise, the wrapper inje
 cm setup agentmemory           # also offered as the last step of install.sh
 ```
 
-**How AgentMemory plugs into Claude Code (upstream):**
-
-| piece | what it is |
-|---|---|
-| `@agentmemory/agentmemory` (npm, Node ≥ 20) | the backend server (`agentmemory`, REST on `localhost:3111`, data in `~/.agentmemory`) and the hook scripts `plugin/scripts/*.mjs`, described by the package's own `plugin/hooks/hooks.json` (12 events) |
-| `@agentmemory/mcp` | the MCP server (`npx -y @agentmemory/mcp`), which proxies to `AGENTMEMORY_URL` |
-| Claude Code plugin | `/plugin marketplace add rohitg00/agentmemory` + `/plugin install agentmemory`. A plugin's hooks run in **every** session, so cm doesn't use it; cm wires the same hooks as companion settings that load only when `agentmemory` is selected. |
-
 **The gate, `INSTALL_AGENT_MEMORY`** (environment variable, else `config.json`):
 
 | value | behaviour |
@@ -221,6 +266,9 @@ cm setup agentmemory           # also offered as the last step of install.sh
 | unset | Ask once. A "no" is saved as `"0"` and you won't be asked again. A "yes" is saved as `"1"`. Without a terminal, nothing is asked or saved. |
 | `0` | Skip. Silent from the installer; `cm setup agentmemory` says it's turned off. Run `INSTALL_AGENT_MEMORY=1 cm setup agentmemory` to run it anyway. |
 | `1` | Run the setup. Every impactful step is still confirmed first. |
+
+<details>
+<summary><b>What the setup does, and what it never does</b></summary>
 
 **What the setup does:**
 
@@ -234,6 +282,16 @@ cm setup agentmemory           # also offered as the last step of install.sh
 **What it never does:** start, stop or reset a backend that already exists; touch AgentMemory's data (`~/.agentmemory`); overwrite an existing file without asking (a `.bak-<timestamp>` copy is kept when you agree); or silently add a second `agentmemory` definition when you already have one elsewhere.
 
 Re-running is safe: unchanged files are reported as up to date. **Re-run it after upgrading AgentMemory or switching Node versions**, because the hook paths point into the current global npm install. Then select `agentmemory` in cm (`cm --mcp agentmemory`). Its 12 hooks load only in those sessions.
+
+**How AgentMemory plugs into Claude Code (upstream):**
+
+| piece | what it is |
+|---|---|
+| `@agentmemory/agentmemory` (npm, Node ≥ 20) | the backend server (`agentmemory`, REST on `localhost:3111`, data in `~/.agentmemory`) and the hook scripts `plugin/scripts/*.mjs`, described by the package's own `plugin/hooks/hooks.json` (12 events) |
+| `@agentmemory/mcp` | the MCP server (`npx -y @agentmemory/mcp`), which proxies to `AGENTMEMORY_URL` |
+| Claude Code plugin | `/plugin marketplace add rohitg00/agentmemory` + `/plugin install agentmemory`. A plugin's hooks run in **every** session, so cm doesn't use it; cm wires the same hooks as companion settings that load only when `agentmemory` is selected. |
+
+</details>
 
 ### Removing AgentMemory
 
@@ -249,7 +307,7 @@ npm uninstall -g @agentmemory/agentmemory
 
 Set `"INSTALL_AGENT_MEMORY": "0"` in `config.json` if you don't want to be offered it again.
 
-## How a launch works
+## How it works
 
 ```
 CMUX_COMPUTER_USE_MCP_DISABLED=1 [CMUX_CUA_SOCKET_AUTH_TOKEN=‹env only›] \
@@ -265,7 +323,8 @@ claude [--strict-mcp-config] [--mcp-config=$TMPDIR/cm-session-XXXX/mcp.json] \
 * The command is an argv list; no shell is involved. cm waits as the parent process: Ctrl+C and Ctrl+\ reach Claude through the terminal, SIGTERM and SIGHUP are forwarded, and Claude's exit code is passed through (128+N for a signal).
 * `--mcp-config` is always passed as a single `--mcp-config=<path>` token, and `--resume` with no id is placed last, so neither can swallow a forwarded argument.
 
-## Control matrix
+<details>
+<summary><b>Control matrix: what each Claude Code mechanism actually does (verified on 2.1.281)</b></summary>
 
 This is documented behaviour of Claude Code, **verified on Claude Code 2.1.281**. Each row was checked with a real headless launch (`claude -p --output-format stream-json --verbose`, Haiku, `MCP_CONNECTION_NONBLOCKING=false`) by reading the `system/init` event (MCP servers, tools, plugins), the hook events and the first request's input-token count. Without `MCP_CONNECTION_NONBLOCKING=false`, `-p` mode emits `init` before any MCP server connects and lists none. cm warns when your Claude Code version differs; see [Verify on your machine](#verify-on-your-machine).
 
@@ -291,6 +350,8 @@ This is documented behaviour of Claude Code, **verified on Claude Code 2.1.281**
 | cmux computer use in strict mode | cm's `cmux-cua` entry, built from the wrapper's template with the token passed only through the environment, connects and lists its tools. | **yes** |
 
 Managed policy lives in `/Library/Application Support/ClaudeCode/` on macOS and `/etc/claude-code/` on Linux (override with `CM_MANAGED_DIR`). cm reads server names from `managed-mcp.json` for the deny list, and warns if `managed-settings.json` or `managed-settings.d/*.json` sets `disableSideloadFlags`, which makes Claude refuse `--mcp-config`.
+
+</details>
 
 ## Verify on your machine
 
@@ -355,4 +416,4 @@ The test suite runs on Python 3.11 and 3.14. `install.sh` is tested in a tempora
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+[MIT](LICENSE) © 2026 VAMS MX

@@ -344,3 +344,141 @@ def test_cm_themes_keep_text_readable():
             for bg in ("background", "surface", "panel"):
                 ratio = _contrast(getattr(t, role), getattr(t, bg))
                 assert ratio >= 4.5, f"{t.name}: {role} on {bg} is {ratio:.2f}:1"
+
+
+def test_arrows_flow_from_box_to_box(catalog):
+    from textual.widgets import Select
+
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        local = app.query_one("#local", SelectionList)
+        local.focus()
+        local.highlighted = local.option_count - 1
+        await pilot.press("down")  # past the last row: next box, first row
+        await pilot.pause()
+        assert app.focused.id == "connectors" and app.focused.highlighted == 0
+        await pilot.press("up")  # back: previous box, last row
+        await pilot.pause()
+        assert app.focused.id == "local" and app.focused.highlighted == local.option_count - 1
+
+        session = app.query_one("#session", RadioSet)
+        session.focus()
+        await pilot.pause()
+        for _ in range(len(list(session.query("RadioButton")))):
+            await pilot.press("down")
+            await pilot.pause()
+        assert app.focused.id == "profile"  # left the radio group instead of wrapping
+        await pilot.press("down")  # a closed Select passes Down on; it doesn't open
+        await pilot.pause()
+        assert not app.query_one("#profile", Select).expanded and app.focused.id == "profile_name"
+        await pilot.press("up", "up")
+        await pilot.pause()
+        assert app.focused.id == "session"
+        assert app.return_value is None
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_scroll_columns_are_not_focus_stops(catalog):
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        ids = [w.id for w in app.screen.focus_chain]
+        assert "left" not in ids and "right" not in ids
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_arrows_still_move_focus_when_the_columns_scroll(catalog):
+    # In a small window the right column overflows; its scroll bindings used to eat Up/Down.
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def go():
+        async with app.run_test(size=(110, 26)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#right").allow_vertical_scroll
+            app.query_one("#profile_name", Input).focus()
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.focused.id == "save"
+            await pilot.press("up", "up")
+            await pilot.pause()
+            assert app.focused.id == "profile"
+
+    asyncio.run(go())
+
+
+def test_up_at_the_top_then_enter_does_not_delete_the_profile(catalog):
+    profiles.save("work", Selection(local=["gdrive"]))
+    app = LauncherApp(catalog, Selection(local=["gdrive"]), claude_bin="claude", profile="work")
+
+    async def steps(app, pilot):
+        app.query_one("#local", SelectionList).focus()
+        await pilot.pause()
+        await pilot.press("up")  # top of the screen: no wrap to the Delete button
+        await pilot.pause()
+        assert app.focused.id == "local"
+        app.query_one("#delete").focus()
+        await pilot.pause()
+        await pilot.press("down")  # bottom of the screen: no wrap either
+        await pilot.pause()
+        assert app.focused.id == "delete"
+        await pilot.press("enter")  # one press only arms Delete
+        await pilot.pause()
+        assert profiles.list_profiles() == ["work"]
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_delete_needs_a_second_press(catalog):
+    profiles.save("work", Selection())
+    app = LauncherApp(catalog, Selection(), claude_bin="claude", profile="work")
+
+    async def steps(app, pilot):
+        await pilot.click("#delete")
+        await pilot.pause()
+        assert profiles.list_profiles() == ["work"] and str(app.query_one("#delete").label) == "Confirm?"
+        await pilot.pause(0.3)  # Button ignores clicks during its 0.2 s "pressed" effect
+        await pilot.click("#delete")
+        await pilot.pause()
+        assert profiles.list_profiles() == [] and str(app.query_one("#delete").label) == "Delete"
+        await pilot.press("escape")
+
+    drive(app, steps)
+
+
+def test_rearming_delete_gets_its_own_full_timeout(catalog):
+    profiles.save("work", Selection())
+    profiles.save("home", Selection())
+    app = LauncherApp(catalog, Selection(), claude_bin="claude", profile="work")
+
+    async def steps(app, pilot):
+        delete = app.query_one("#delete")
+        delete.press()  # arms "work"; its timer would fire at t=4
+        await pilot.pause(2.5)
+        app.query_one("#profile_name", Input).value = "home"
+        delete.press()  # re-arms for "home" until t=6.5
+        await pilot.pause(2.0)  # t=4.5: past the first deadline
+        assert app._armed_delete == "home" and str(delete.label) == "Confirm?"
+        await pilot.press("escape")
+
+    drive(app, steps)
+    assert set(profiles.list_profiles()) == {"work", "home"}
+
+
+def test_delete_with_an_empty_name_does_not_arm(catalog):
+    app = LauncherApp(catalog, Selection(), claude_bin="claude")
+
+    async def steps(app, pilot):
+        app.query_one("#profile_name", Input).value = ""
+        app.query_one("#delete").press()
+        await pilot.pause()
+        assert app._armed_delete is None and str(app.query_one("#delete").label) == "Delete"
+        await pilot.press("escape")
+
+    drive(app, steps)
