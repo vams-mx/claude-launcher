@@ -25,6 +25,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Exact selection.** Choose local MCP servers, claude.ai connectors (one by one), plugins and cmux computer use per session. Anything you don't pick doesn't load, and that was verified with real launches.
 - **See the cost first.** Each item shows its measured context cost, and the preview adds up the total before you launch.
 - **Profiles.** Save combinations like `memory+github` or `research`, set a default and override it with flags.
+- **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), so you don't tick the same servers every time.
 - **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
 - **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
 - **Keyboard-first screen.** ↑/↓ flow through every box, Space toggles, Enter launches. Seven sober themes, with WCAG-contrast text.
@@ -34,7 +35,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 
 ## Contents
 
-- [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Themes](#themes)
+- [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Last selection per project](#last-selection-per-project) · [Themes](#themes)
 - [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
 - [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
@@ -110,6 +111,7 @@ Copy **only `config.json` and `profiles/`**. Everything else in `~/.claude-launc
 * `sessions/` holds the files cm passes to Claude. They contain absolute paths of this machine (hook scripts, the cmux client, cmux's socket and state directories), so they are never reused on another machine. Their names are content hashes, so another machine's files could never be mistaken for this one's, but don't copy or sync the directory.
 * **A synced config home** (`CM_CONFIG_DIR` in iCloud Drive, Dropbox, Google Drive, OneDrive): `sessions/` would sync too, and one machine's cleanup could delete another machine's session files. Keep them local with `export CM_SESSIONS_DIR=~/.local/state/cm-sessions` (any local directory). `cm --where` shows where session files go and warns when that is inside a synced folder.
 * `connectors.json` (`cm --refresh`) and `costs.json` (`cm --measure`) are caches; rebuild them.
+* `last/` remembers the screen's last selection per project, keyed by this machine's absolute project paths. Don't copy it; each machine builds its own (`cm --forget-last` clears one project).
 * `mcps/agentmemory-*.json` are generated with this machine's Node paths; `cm setup agentmemory` writes them again.
 
 The MCP server files your `mcp_folders` point to must exist on the new machine too (keep them in a dotfiles repo, for example). `cm --where` marks a folder that doesn't exist as `missing`, and a profile entry whose server isn't found is dropped with a warning. Without `~/.personal`, cmux or AgentMemory, cm works with its defaults: the cmux group is hidden and `cm --cmux` says cmux isn't installed.
@@ -129,6 +131,7 @@ cm --resume <id> --fork --name "Kafka retry"   # fork a session into a new, name
 cm --mcp github --name "Release prep"          # a new session with a name
 cm --list                            # everything that can be selected, with measured context cost
 cm --where                           # config home, MCP folders scanned, and where each server came from
+cm --forget-last                     # forget the screen's last selection for this project
 cm --mcp github --dry-run            # print the exact command instead of launching
 cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchanged
 ```
@@ -149,12 +152,23 @@ cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchan
 | **Tab** | jump to the next box |
 | **Ctrl+S** | save the selection as a profile |
 | **Ctrl+R** | refresh the claude.ai connector list |
-| **Ctrl+N** | clear everything |
+| **Ctrl+N** | clear everything (and hide the "Pre-filled from your last launch" note) |
 | **Ctrl+T** | next theme (saved) |
 | **Ctrl+P** | command palette: *Theme* picks any theme (saved) |
 | **Esc** | quit without launching |
 
-Nothing is selected unless you set a default profile. Deleting a profile needs a second press of Delete within 4 seconds.
+The screen opens with what you last launched from it in this project, else your default profile, else nothing (see [below](#last-selection-per-project)). Deleting a profile needs a second press of Delete within 4 seconds.
+
+## Last selection per project
+
+When you launch from the screen, cm remembers the selection for the current project, and the next `cm` there opens pre-filled with it and a note: *Pre-filled from your last launch in ~/work/api (Ctrl+N clears)*. The preview works as usual; Ctrl+N clears the lists.
+
+* **The project** is the git repository you are in, found by walking up to the nearest `.git` (git itself is never run), so every subdirectory of a repository shares one entry. A linked worktree (`git worktree add`) counts as its main repository (or its bare repository); a submodule is its own project. Outside a repository it is the directory itself. A repository at `$HOME` itself (dotfiles) only counts for `~`, not for every directory under it.
+* **What is remembered:** local MCP servers, connectors, plugins, cmux and the model. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork or the session name.
+* **When:** written only after a launch from the screen actually started `claude` (not on Esc, `--dry-run`, or when `claude` can't be started). Headless launches (`cm --mcp …`, `cm --profile …` without `-i`) never read or write it.
+* **Order** for what the screen opens with: explicit selection flags (`cm -i --mcp …`) > `--profile NAME` > the last selection for this project > the default profile > nothing. Flags or a profile replace the last selection entirely; they don't merge with it.
+* Items that no longer exist are dropped with a warning, like for profiles. A file that can't be read or understood is ignored with a warning, and a failure to save one only warns; neither ever stops a launch.
+* Stored in `~/.claude-launcher/last/<hash of the project path>.json` (directory 0700, file 0600; `CM_CONFIG_DIR` is respected). The file also records the project path. `cm --where` shows this project's file; `cm --forget-last` deletes it. Set `"remember_last": false` in `config.json` to turn the feature off completely (nothing read or written).
 
 ## Themes
 
@@ -190,9 +204,10 @@ Everything cm owns lives in **`~/.claude-launcher/`** (set `CM_CONFIG_DIR` to us
 | `connectors.json` | cache of `claude mcp list` (written by `cm --refresh`) |
 | `costs.json` | measured context costs (written by `cm --measure`) |
 | `sessions/<id>/` | the `mcp.json` and `settings.json` passed to Claude, kept so cmux can restore sessions ([details](#how-it-works)). `CM_SESSIONS_DIR` moves them elsewhere. |
+| `last/<hash>.json` | the screen's last selection per project ([details](#last-selection-per-project)) |
 | `logs/` | only if you register the AgentMemory service |
 
-`connectors.json`, `costs.json` and `sessions/` are per machine; see [Reinstall / new machine](#reinstall--new-machine).
+`connectors.json`, `costs.json`, `sessions/` and `last/` are per machine; see [Reinstall / new machine](#reinstall--new-machine).
 
 Upgrading from cm 0.1, which kept its state in `~/.config/claude-launcher`: the first run copies that directory to `~/.claude-launcher/` once, prints a notice, and writes the folders cm 0.1 scanned by default (plus any `mcp_folders`/`sources` from its `catalog.json`) into the new `config.json`, so the same servers keep showing up. The old directory is never modified or deleted; remove it yourself when you're happy.
 
@@ -211,7 +226,8 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
   "theme": "cm-paper",
   "INSTALL_AGENT_MEMORY": "0",
   "session_retention_days": 60,
-  "recent_sessions": 3
+  "recent_sessions": 3,
+  "remember_last": true
 }
 ```
 
@@ -219,14 +235,14 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
 |---|---|
 | `mcp_folders` | Folders scanned, in order, for `*.json` files with a top-level `mcpServers` object. Add as many as you like. If the key is absent, only `~/.claude-launcher/mcps` is scanned. If it's `[]`, no folder is scanned. Missing folders are skipped. |
 | `sources` | Individual files, each with an optional companion `settings` file and `description`. These are read before the folders. |
-| `default_profile` | The profile plain `cm` opens with. Set it with `cm --set-default NAME`. |
+| `default_profile` | The profile plain `cm` opens with in a project that has no [last selection](#last-selection-per-project) yet (or with `remember_last: false`). Set it with `cm --set-default NAME`. |
 | `theme` | Colours of the interactive screen. cm's own sober themes: dark `cm-graphite` (default), `cm-slate`, `cm-moss`, `cm-ink`; light `cm-paper`, `cm-sand`, `cm-mist`. Any built-in Textual theme also works (`nord`, `gruvbox`, `flexoki`, `solarized-light`, `textual-dark`, …). Ctrl+T cycles through cm's themes and then those five; Ctrl+P → Theme picks any. Either way the choice is saved here. All cm themes keep text at a WCAG contrast of at least 4.5:1. |
 | `INSTALL_AGENT_MEMORY` | The AgentMemory gate (see [below](#agentmemory-optional)). The environment variable of the same name overrides it. |
 | `session_retention_days` | How long a session directory in `sessions/` is kept after its last use. Use means a launch through cm, or any start or resume of a session with those files, including a cmux restore (a SessionStart hook marks the directory). The hook can't run when hooks are turned off (`disableAllHooks: true`, or a managed policy that allows only managed hooks); then only launches through cm count, so a session you only ever restore expires. In that case set `0`. Default `60`; `0` keeps them forever. Older ones are deleted on the next launch. A cmux restore of a session whose files were deleted fails with `MCP config file not found`; start it again with cm (`cm --resume <id>`). |
-
 | `recent_sessions` | How many of the current project's Claude Code sessions the screen's **Recent** selector lists, newest activity first. Default `3`, at most `50`; `0` hides the selector. `cm --sessions` lists the same number (3 when this is `0`); `cm --sessions N` overrides it. |
+| `remember_last` | `true` (default): the screen opens with what you last launched from it in the same project ([details](#last-selection-per-project)). `false` turns that off completely: nothing is read or written. |
 
-`cm --where` shows the config home, each folder in scan order (with how many server files it holds, or `missing`), the explicit sources, and the file every server came from. Add `--json` for machine-readable output. It prints paths only, never server definitions or `env` values.
+`cm --where` shows the config home, this project's last-selection file, each folder in scan order (with how many server files it holds, or `missing`), the explicit sources, and the file every server came from. Add `--json` for machine-readable output. It prints paths only, never server definitions or `env` values.
 
 ### Adding MCP servers
 
@@ -261,7 +277,7 @@ Files named `*.settings.json` or `*-settings.json` are never treated as server f
 
 ```bash
 cm --mcp agentmemory,github --dry-run --save-profile memory+github
-cm --set-default memory+github        # plain `cm` opens pre-filled with it; `--set-default none` clears it
+cm --set-default memory+github        # plain `cm` opens pre-filled with it (where nothing was launched yet); `--set-default none` clears it
 cm --profiles ; cm --delete-profile memory+github
 cm --profile memory+github --model sonnet   # flags override profile fields
 ```

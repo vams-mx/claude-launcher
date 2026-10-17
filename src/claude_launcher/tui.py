@@ -9,6 +9,10 @@ The Session box: New / Continue / Resume… (claude's picker), a Recent selector
 means "resume that id"), Fork (--fork-session) and Name (--name). Name is
 pre-filled for a resumed or forked session; launching a new session with an
 empty name asks once first.
+
+Opened without selection flags, the screen starts from the selection last
+launched from it in this project (remember.py; cli.py decides) and says so in
+a note at the top, which Ctrl+N (clear all) or loading a profile hides.
 """
 
 from __future__ import annotations
@@ -118,6 +122,7 @@ RadioSet:focus { border: round $accent; background: $boost; }
 #recent { margin-top: 0; }
 #fork { width: 100%; }
 #name_note { color: $warning; }
+#prefill { padding: 0 1; }
 #profile_row { height: auto; }
 #profile_row Input { width: 1fr; }
 #profile_row Button { min-width: 8; margin-left: 1; }
@@ -142,7 +147,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     ]
 
     def __init__(self, cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
-                 notes: list[str] | None = None, auto_refresh: bool = False) -> None:
+                 notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None) -> None:
         super().__init__()
         self.cat = cat
         self.sel = initial
@@ -153,6 +158,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.health: dict[str, str] = {}
         self.plan_ok = True
         self.refresh_on_start = auto_refresh
+        self.prefill = prefill  # "Pre-filled from your last launch in …", or None
         self._armed_delete: str | None = None  # profile name armed by a first Delete press
         cfg_warnings: list[str] = []
         self.recent_limit = config_mod.recent_sessions(config_mod.load_config(), cfg_warnings)
@@ -172,6 +178,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         with Horizontal(id="body"):
             with FlowColumn(id="left") as left:
                 left.can_focus = False  # arrows/Tab go box to box, not to the column
+                note = Static(self.prefill or "", classes="note", id="prefill")
+                note.display = bool(self.prefill)
+                yield note
                 yield Label("Local MCP servers", classes="group")
                 yield FlowSelectionList(*self._local_items(), id="local")
                 yield Label("claude.ai connectors", classes="group")
@@ -535,6 +544,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.profile_name = name
         self.query_one("#profile_name", Input).value = name
         self._apply(loaded)
+        self._hide_prefill()
         self.notify(f"loaded profile {name}")
         for n in notes:
             self.notify(n, severity="warning")
@@ -692,6 +702,10 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     def action_select_none(self) -> None:
         for wid in ("local", "connectors", "plugins", "cmux"):
             self.query_one(f"#{wid}", SelectionList).deselect_all()
+        self._hide_prefill()
+
+    def _hide_prefill(self) -> None:
+        self.query_one("#prefill", Static).display = False
 
     @work(thread=True, exclusive=True, group="refresh")
     def action_refresh_connectors(self) -> None:
@@ -742,8 +756,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
 
 def run_tui(cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
-            notes: list[str] | None = None, auto_refresh: bool = False) -> Selection | None:
-    app = LauncherApp(cat, initial, claude_bin=claude_bin, profile=profile, notes=notes, auto_refresh=auto_refresh)
+            notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None) -> Selection | None:
+    app = LauncherApp(cat, initial, claude_bin=claude_bin, profile=profile, notes=notes, auto_refresh=auto_refresh,
+                      prefill=prefill)
     result = app.run()
     if result and result[0] == "launch":
         return result[1]

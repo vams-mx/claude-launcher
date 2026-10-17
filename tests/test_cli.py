@@ -11,8 +11,10 @@ from tests.conftest import CUA_TOKEN, MEM_SECRET, SECRET
 def launched(monkeypatch):
     calls = []
 
-    def fake_launch(cat, sel, *, claude_bin):
+    def fake_launch(cat, sel, *, claude_bin, on_started=None):
         calls.append(sel)
+        if on_started:  # like launcher.launch once claude has started
+            on_started()
         return 0
 
     monkeypatch.setattr(cli, "launch", fake_launch)

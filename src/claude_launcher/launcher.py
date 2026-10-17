@@ -102,7 +102,9 @@ def exit_code(rc: int) -> int:
 
 
 def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = None,
-             cwd: Path | None = None) -> int:
+             cwd: Path | None = None, on_started: Callable[[], None] | None = None) -> int:
+    """Start claude and wait for it. `on_started` runs once claude has actually been started
+    (never when it couldn't be); an exception from it is ignored."""
     popen = popen or subprocess.Popen
     env = {k: v for k, v in os.environ.items() if k not in plan.env_unset}
     env.update(plan.env_overrides)
@@ -114,6 +116,9 @@ def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = N
     except PermissionError:
         print(f"cm: cannot run {plan.argv[0]!r}: permission denied", file=sys.stderr)
         return 126
+    if on_started is not None:
+        with contextlib.suppress(Exception):  # bookkeeping must never fail a launch
+            on_started()
     with _child_signals(proc):
         while True:
             try:
@@ -128,6 +133,7 @@ def launch(
     *,
     claude_bin: str,
     popen: Callable[..., subprocess.Popen] | None = None,
+    on_started: Callable[[], None] | None = None,
 ) -> int:
     plan = build_plan(cat, sel, claude_bin=claude_bin)
     try:
@@ -139,6 +145,6 @@ def launch(
         with temp_session_dir() as tmp:
             plan = build_plan(cat, sel, claude_bin=claude_bin, session_dir=tmp)
             write_session_files(plan)
-            return run_plan(plan, popen, cwd=cat.cwd)
+            return run_plan(plan, popen, cwd=cat.cwd, on_started=on_started)
     cleanup_sessions(keep=d)
-    return run_plan(plan, popen, cwd=cat.cwd)  # the directory the catalog (and deny list) was built for
+    return run_plan(plan, popen, cwd=cat.cwd, on_started=on_started)  # the directory the catalog (and deny list) was built for

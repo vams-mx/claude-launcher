@@ -1,11 +1,12 @@
 """`cm` command line.
 
-  cm                              interactive screen (pre-filled from the default profile)
+  cm                              interactive screen (pre-filled from your last launch here, else the default profile)
   cm --profile memory+gdrive      launch a saved profile without the screen
   cm --mcp agentmemory,gdrive     choose local MCP servers
   cm --connectors none|all|Slack,Todoist
   cm --plugins none|all|commit-commands
   cm --cmux / --no-mcp / --list / --where / --continue / --resume [id]
+  cm --forget-last                forget the screen's last selection for this project
   cm --resume <id> --fork --name "new name"    resume (or fork) a session, naming it
   cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
   cm ... -- <args forwarded verbatim to claude>
@@ -25,7 +26,7 @@ from pathlib import Path
 from . import __version__, compat
 from . import config as cfg_mod
 from . import costs as costs_mod
-from . import profiles, recent, sessions
+from . import profiles, recent, remember, sessions
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
 from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
@@ -94,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
     info.add_argument("--save-profile", metavar="NAME", help="save the resulting selection as a profile")
     info.add_argument("--delete-profile", metavar="NAME")
     info.add_argument("--set-default", metavar="NAME", help="make a profile the default ('none' to clear)")
+    info.add_argument("--forget-last", action="store_true",
+                      help="forget the selection last launched from the screen in this project "
+                           "(remember_last in config.json turns remembering off)")
     p.add_argument("--claude-bin", metavar="PATH", default=os.environ.get("CM_CLAUDE_BIN"),
                    help="claude executable (default: `claude` on PATH, i.e. cmux's wrapper inside cmux)")
     p.add_argument("--cwd", metavar="DIR", help=argparse.SUPPRESS)
@@ -106,15 +110,33 @@ def _selection_flags_given(a: argparse.Namespace) -> bool:
                 a.cmux is not None, a.no_mcp, a.model, a.skip_permissions, a.cont, a.resume is not None])
 
 
+def _has_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _err(msg: str) -> None:
     print(f"cm: {msg}", file=sys.stderr)
 
 
-def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str]) -> tuple[Selection, list[str]]:
+def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str],
+                      last: Selection | None = None) -> tuple[Selection, list[str]]:
+    """The starting selection: explicit selection flags > --profile > `last` (the last selection
+    launched from the screen in this project; the caller passes it only when the screen opens)
+    > the default profile > nothing. Flags override fields of a --profile; the last selection
+    and the default profile are used only when no selection flag is given."""
     notes: list[str] = []
-    name = a.profile or (None if _selection_flags_given(a) else profiles.get_default())
+    if _selection_flags_given(a):
+        name = a.profile
+    elif last is not None:
+        name = None
+    else:
+        name = profiles.get_default()
     if name:
         base, notes = profiles.reconcile(profiles.load(name), cat)
+    elif last is not None and not _selection_flags_given(a):
+        base, notes = profiles.reconcile(last, cat)
+        notes = [f"last launch: {n}" for n in notes]
+        base.permissions = "standard"  # never pre-selected from a remembered launch
     else:
         base = Selection()
     sel = Selection.from_dict(base.to_dict())
@@ -273,6 +295,14 @@ def _server_files(folder: Path) -> int:
     return n
 
 
+def _last_info(cwd: Path) -> dict:
+    root = remember.project_root(cwd)
+    path = remember.entry_path(root)
+    warnings: list[str] = []
+    return {"project": tilde(root), "file": tilde(path), "exists": path.is_file(),
+            "enabled": cfg_mod.remember_last(cfg_mod.load_config(), warnings), "warnings": warnings}
+
+
 def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | None) -> None:
     """Paths only: never server configs or env values."""
     legacy = legacy_config_dir()
@@ -290,6 +320,7 @@ def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | Non
         "sessions_dir_from": "CM_SESSIONS_DIR" if os.environ.get("CM_SESSIONS_DIR") else "default",
         "sessions_synced_folder": sessions.synced_folder(),
         "session_retention_days": sessions.retention_days(cfg_mod.load_config()),
+        "last_selection": _last_info(cat.cwd),
         "managed_dir": str(managed_dir()),
         "claude": {"bin": claude_bin, "version": version, "verified_on": list(compat.VERIFIED_VERSIONS),
                    "warning": compat.version_warning(version)},
@@ -309,6 +340,15 @@ def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | Non
     if doc["sessions_synced_folder"]:
         print(f"              • inside a synced folder ({doc['sessions_synced_folder']}): session files are per machine, "
               "and one machine's cleanup can delete another's. Set CM_SESSIONS_DIR to a local directory.")
+    last = doc["last_selection"]
+    state = "" if last["enabled"] else "; remember_last is off"
+    if last["exists"]:
+        print(f"last launch   {last['file']}  (this project: {last['project']}; per machine; "
+              f"cm --forget-last deletes it{state})")
+    else:
+        print(f"last launch   none for {last['project']} (would be {last['file']}{state})")
+    for w in last["warnings"]:
+        print(f"              • {w}")
     print(f"managed dir   {doc['managed_dir']}")
     print(f"claude        {claude_bin} ({version or 'version unknown'}; control matrix verified on "
           f"{', '.join(compat.VERIFIED_VERSIONS)})")
@@ -404,6 +444,16 @@ def main(argv: list[str] | None = None) -> int:
         _err(str(exc))
         return 2
 
+    if a.forget_last:
+        try:
+            root, path, existed = remember.forget(cwd)
+        except OSError as exc:
+            _err(f"could not forget the last selection: {exc}")
+            return 1
+        print(f"forgot the last selection for {tilde(root)}" if existed
+              else f"no last selection remembered for {tilde(root)}")
+        return 0
+
     if a.sessions is not None:
         cfg_warnings: list[str] = []
         # recent_sessions: 0 only hides the screen's selector; an explicit `cm --sessions` still lists
@@ -460,25 +510,44 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {k:45s} {costs_mod.fmt(res.get(k))}")
         return 0
 
+    headless = _selection_flags_given(a) and not a.interactive
+    screen = not headless and not a.dry_run
+    # The last selection: read only when the screen opens with no selection flags, written only
+    # after the screen launched claude. Headless launches and --dry-run never touch it.
+    remember_on = False
+    last: remember.Entry | None = None
+    last_notes: list[str] = []
+    if screen:
+        remember_on = cfg_mod.remember_last(cfg_mod.load_config(), last_notes)
+        if remember_on and not _selection_flags_given(a):
+            last, warns = remember.load(cwd)
+            last_notes += warns
+        for w in last_notes:
+            _err(f"warning: {w}")
+
     try:
-        sel, notes = resolve_selection(a, cat, passthrough)
+        sel, notes = resolve_selection(a, cat, passthrough, last.selection if last else None)
     except (PlanError, profiles.ProfileError) as exc:
         _err(str(exc))
         return 2
+    if last:
+        notes = [f"last launch: {n}" for n in last.notes] + notes
     # checked on the resolved selection, so a profile's session ("continue") counts
     if sel.fork and not can_fork(sel):
         _err("--fork needs a session to fork: --resume <id> or --continue")
         return 2
-    headless = _selection_flags_given(a) and not a.interactive
 
-    if not headless and not a.dry_run:
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if screen:
+        if not _has_tty():
             _err("no TTY for the interactive screen; pass selection flags (e.g. --mcp, --profile)")
             return 2
         from .tui import run_tui
 
-        chosen = run_tui(cat, sel, claude_bin=claude_bin, profile=a.profile or profiles.get_default(),
-                         notes=notes + cat.warnings, auto_refresh=connectors_stale(cat))
+        prefill = f"Pre-filled from your last launch in {tilde(last.project)} (Ctrl+N clears)" if last else None
+        chosen = run_tui(cat, sel, claude_bin=claude_bin,
+                         profile=a.profile or (None if last else profiles.get_default()),
+                         notes=last_notes + notes + cat.warnings, auto_refresh=connectors_stale(cat),
+                         prefill=prefill)
         if chosen is None:
             return 0
         sel = chosen
@@ -523,13 +592,25 @@ def main(argv: list[str] | None = None) -> int:
     if headless:
         for w in plan.warnings:
             _err(w)
+    save_warnings: list[str] = []
+    launched_sel = sel
+
+    def remember_launch() -> None:  # runs once claude has started; never while it couldn't
+        if w := remember.save(cwd, launched_sel):
+            save_warnings.append(w)
+
+    hook = {"on_started": remember_launch} if screen and remember_on else {}
     try:
-        return launch(cat, sel, claude_bin=claude_bin)
+        return launch(cat, sel, claude_bin=claude_bin, **hook)
     except PlanError as exc:
         _err(str(exc))
         return 2
     except KeyboardInterrupt:
         return 130
+    finally:
+        # printed after claude exits: written while it runs, it would land in the middle of its screen
+        for w in save_warnings:
+            _err(f"warning: {w}")
 
 
 if __name__ == "__main__":  # pragma: no cover

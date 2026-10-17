@@ -18,6 +18,9 @@ Keys (all optional; keys starting with `_` are documentation and ignored):
   recent_sessions       how many of this project's Claude Code sessions the
                         screen's Recent selector (and `cm --sessions`) lists;
                         default 3, 0 hides the selector, at most 50.
+  remember_last         true (default) / false: pre-fill the screen with the
+                        selection last launched from it in this project
+                        (remember.py); false turns reading and writing off.
 
 Also: the one-time migration from the pre-0.2 home (~/.config/claude-launcher).
 """
@@ -46,7 +49,8 @@ COMMENT = [
     "sources: explicit files, e.g. {\"mcp_config\": \"~/x/foo-mcp.json\", \"settings\": \"~/x/foo-hooks.json\", "
     "\"description\": \"...\"}",
     "  A companion settings file (hooks) loads only when one of that file's servers is selected.",
-    "default_profile: the profile plain `cm` opens with (cm --set-default NAME).",
+    ("default_profile: the profile plain `cm` opens with (cm --set-default NAME) in a project with no remembered "
+     "last selection (see remember_last)."),
     "theme: colours of the interactive screen: cm-graphite (default), cm-slate, cm-moss, cm-ink, cm-paper, cm-sand, cm-mist, or any Textual theme. Ctrl+T cycles.",
     "INSTALL_AGENT_MEMORY: absent = ask once, \"0\" = never ask, \"1\" = run `cm setup agentmemory`.",
     "  The environment variable INSTALL_AGENT_MEMORY overrides this value.",
@@ -57,6 +61,10 @@ COMMENT = [
      "managed-only hooks) only launches through cm count, so use 0 there."),
     ("recent_sessions: how many of the current project's Claude Code sessions the screen's Recent selector and "
      "`cm --sessions` list (default 3, 0 hides the selector, max 50). Read-only from ~/.claude/projects."),
+    ("remember_last: true (default) pre-fills the screen with what you last launched from it in the same project "
+     "(git root, else the directory): MCPs, connectors, plugins, cmux, model; never Skip permissions or the "
+     "session. Stored per machine in last/. false turns it off (nothing read or written); `cm --forget-last` "
+     "forgets one project."),
     f"Docs: {DOCS_URL}",
 ]
 
@@ -138,6 +146,17 @@ def recent_sessions(cfg: dict[str, Any] | None = None, warnings: list[str] | Non
         warnings.append(f"config.json: recent_sessions must be a whole number from 0 to {MAX_RECENT_SESSIONS}, "
                         f"not {raw!r}; using {DEFAULT_RECENT_SESSIONS}")
     return DEFAULT_RECENT_SESSIONS
+
+
+def remember_last(cfg: dict[str, Any] | None = None, warnings: list[str] | None = None) -> bool:
+    """`remember_last`: true (default) or false. Anything else warns and uses true."""
+    cfg = load_config() if cfg is None else cfg
+    raw = cfg.get("remember_last", True)
+    if isinstance(raw, bool):
+        return raw
+    if warnings is not None:
+        warnings.append(f"config.json: remember_last must be true or false, not {raw!r}; using true")
+    return True
 
 
 def mcp_folders(cfg: dict[str, Any] | None = None) -> list[Path]:
