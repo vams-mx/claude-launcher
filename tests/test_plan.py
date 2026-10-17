@@ -294,3 +294,13 @@ def test_worktree_needs_a_repository_tmux_and_a_usable_name(fake_home, monkeypat
 
 def test_passthrough_worktree_alone_is_passed_through(catalog):
     assert plan_for(catalog, extra_args=["-w", "mine"]).argv[-2:] == ["-w", "mine"]
+
+
+def test_session_name_survives_local_servers(catalog):
+    # regression: the server loop reused the variable holding the session name, so a session with
+    # local MCPs was named after the last one (e.g. "agentmemory")
+    for local in (["gdrive"], ["agentmemory"], ["agentmemory", "gdrive"]):
+        p = plan_for(catalog, local=local, name="My_session_name")
+        i = p.argv.index("--name")
+        assert p.argv[i + 1] == "My_session_name"
+        assert p.argv.count("--name") == 1

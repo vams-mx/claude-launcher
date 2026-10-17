@@ -171,8 +171,8 @@ def build_plan(
         raise PlanError(f"unknown session mode {sel.session!r}")
     if sel.fork and not can_fork(sel):
         raise PlanError("fork needs a session to fork: a session id (--resume <id>) or --continue")
-    name = session_name(sel)
-    if name and passthrough_name(sel.extra_args):
+    display_name = session_name(sel)  # not `name`: the server loops below reuse that word
+    if display_name and passthrough_name(sel.extra_args):
         raise PlanError("the session is named twice (--name and a --name/-n after --); keep only one")
     if sel.tmux and sel.worktree is None:
         raise PlanError("tmux needs a worktree (claude's --tmux only works with -w)")
@@ -300,8 +300,8 @@ def build_plan(
     argv += list(sel.extra_args)
     if sel.fork:
         argv.append("--fork-session")
-    if name:
-        argv += ["--name", name]  # a required option value: claude takes it even if it starts with "-"
+    if display_name:
+        argv += ["--name", display_name]  # a required option value: claude takes it even if it starts with "-"
     if sel.worktree is not None:
         # -w takes an optional value: always give one (a valid name never starts with "-")
         argv += ["-w", sel.worktree]
