@@ -15,6 +15,9 @@ Keys (all optional; keys starting with `_` are documentation and ignored):
                         resume of that session, e.g. a cmux restore); default
                         60, 0 = forever. Starts/resumes count only while hooks
                         run (not with disableAllHooks or managed-only hooks).
+  recent_sessions       how many of this project's Claude Code sessions the
+                        screen's Recent selector (and `cm --sessions`) lists;
+                        default 3, 0 hides the selector, at most 50.
 
 Also: the one-time migration from the pre-0.2 home (~/.config/claude-launcher).
 """
@@ -52,6 +55,8 @@ COMMENT = [
      "of a session with them (a cmux restore too). Default 60; 0 keeps them forever."),
     ("  Starts and resumes are noticed by a SessionStart hook: with hooks disabled (disableAllHooks, or "
      "managed-only hooks) only launches through cm count, so use 0 there."),
+    ("recent_sessions: how many of the current project's Claude Code sessions the screen's Recent selector and "
+     "`cm --sessions` list (default 3, 0 hides the selector, max 50). Read-only from ~/.claude/projects."),
     f"Docs: {DOCS_URL}",
 ]
 
@@ -116,6 +121,23 @@ def _folder_list(raw: Any) -> list[str]:
     if isinstance(raw, str):
         raw = [raw]
     return [p for p in raw if isinstance(p, str) and p.strip()] if isinstance(raw, list) else []
+
+
+DEFAULT_RECENT_SESSIONS = 3
+MAX_RECENT_SESSIONS = 50
+
+
+def recent_sessions(cfg: dict[str, Any] | None = None, warnings: list[str] | None = None) -> int:
+    """`recent_sessions`: a whole number 0..50 (default 3; 0 hides the Recent selector).
+    Anything else warns and uses the default."""
+    cfg = load_config() if cfg is None else cfg
+    raw = cfg.get("recent_sessions", DEFAULT_RECENT_SESSIONS)
+    if isinstance(raw, int) and not isinstance(raw, bool) and 0 <= raw <= MAX_RECENT_SESSIONS:
+        return raw
+    if warnings is not None:
+        warnings.append(f"config.json: recent_sessions must be a whole number from 0 to {MAX_RECENT_SESSIONS}, "
+                        f"not {raw!r}; using {DEFAULT_RECENT_SESSIONS}")
+    return DEFAULT_RECENT_SESSIONS
 
 
 def mcp_folders(cfg: dict[str, Any] | None = None) -> list[Path]:

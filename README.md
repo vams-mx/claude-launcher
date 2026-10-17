@@ -25,6 +25,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Exact selection.** Choose local MCP servers, claude.ai connectors (one by one), plugins and cmux computer use per session. Anything you don't pick doesn't load, and that was verified with real launches.
 - **See the cost first.** Each item shows its measured context cost, and the preview adds up the total before you launch.
 - **Profiles.** Save combinations like `memory+github` or `research`, set a default and override it with flags.
+- **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
 - **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
 - **Keyboard-first screen.** ↑/↓ flow through every box, Space toggles, Enter launches. Seven sober themes, with WCAG-contrast text.
 - **Scriptable.** Every choice is also a flag, and anything after `--` goes to `claude` unchanged.
@@ -34,7 +35,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 ## Contents
 
 - [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Themes](#themes)
-- [Configuration](#configuration) · [Profiles](#profiles) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
+- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
 - [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
 - [Security](#security) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations) · [Development](#development)
@@ -123,6 +124,9 @@ cm --connectors Slack,Linear         # only these claude.ai connectors
 cm --plugins none --model sonnet     # no plugins, Sonnet
 cm --no-mcp --continue               # no MCP at all, continue the last conversation
 cm --resume                          # claude's native resume picker, with your MCP choice
+cm --sessions                        # this project's recent sessions: id, age, name (--json too)
+cm --resume <id> --fork --name "Kafka retry"   # fork a session into a new, named one
+cm --mcp github --name "Release prep"          # a new session with a name
 cm --list                            # everything that can be selected, with measured context cost
 cm --where                           # config home, MCP folders scanned, and where each server came from
 cm --mcp github --dry-run            # print the exact command instead of launching
@@ -134,14 +138,14 @@ cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchan
 ## The screen
 
 - **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
-- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume) and **Profiles**.
+- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork** and **Name**; see [Sessions](#sessions-recent-fork-name)) and **Profiles**.
 - **Bottom:** a live preview of the exact command (secrets redacted), the isolation mode, the session file directory, what will load, the hooks added, the estimated context cost and any warnings.
 
 | key | action |
 |---|---|
 | **↑ / ↓** | move row by row through every box. Past a box's last row you land on the next box. It stops at the top and bottom instead of wrapping. |
 | **Space** | toggle |
-| **Enter** | launch (on the profile list, open it) |
+| **Enter** | launch (on the Recent or profile list, open it). A new session with an empty Name asks once first: the cursor jumps to Name, and a second Enter launches without a name. |
 | **Tab** | jump to the next box |
 | **Ctrl+S** | save the selection as a profile |
 | **Ctrl+R** | refresh the claude.ai connector list |
@@ -206,7 +210,8 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
   "default_profile": "memory+github",
   "theme": "cm-paper",
   "INSTALL_AGENT_MEMORY": "0",
-  "session_retention_days": 60
+  "session_retention_days": 60,
+  "recent_sessions": 3
 }
 ```
 
@@ -218,6 +223,8 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
 | `theme` | Colours of the interactive screen. cm's own sober themes: dark `cm-graphite` (default), `cm-slate`, `cm-moss`, `cm-ink`; light `cm-paper`, `cm-sand`, `cm-mist`. Any built-in Textual theme also works (`nord`, `gruvbox`, `flexoki`, `solarized-light`, `textual-dark`, …). Ctrl+T cycles through cm's themes and then those five; Ctrl+P → Theme picks any. Either way the choice is saved here. All cm themes keep text at a WCAG contrast of at least 4.5:1. |
 | `INSTALL_AGENT_MEMORY` | The AgentMemory gate (see [below](#agentmemory-optional)). The environment variable of the same name overrides it. |
 | `session_retention_days` | How long a session directory in `sessions/` is kept after its last use. Use means a launch through cm, or any start or resume of a session with those files, including a cmux restore (a SessionStart hook marks the directory). The hook can't run when hooks are turned off (`disableAllHooks: true`, or a managed policy that allows only managed hooks); then only launches through cm count, so a session you only ever restore expires. In that case set `0`. Default `60`; `0` keeps them forever. Older ones are deleted on the next launch. A cmux restore of a session whose files were deleted fails with `MCP config file not found`; start it again with cm (`cm --resume <id>`). |
+
+| `recent_sessions` | How many of the current project's Claude Code sessions the screen's **Recent** selector lists, newest activity first. Default `3`, at most `50`; `0` hides the selector. `cm --sessions` lists the same number (3 when this is `0`); `cm --sessions N` overrides it. |
 
 `cm --where` shows the config home, each folder in scan order (with how many server files it holds, or `missing`), the explicit sources, and the file every server came from. Add `--json` for machine-readable output. It prints paths only, never server definitions or `env` values.
 
@@ -260,6 +267,55 @@ cm --profile memory+github --model sonnet   # flags override profile fields
 ```
 
 Profiles live in `~/.claude-launcher/profiles/<name>.json`. Names may use letters, digits, `.`, `_`, `+` and `-`. When a profile is loaded, entries that no longer exist (a removed server, a vanished connector, cmux on a machine without cmux) are dropped with a warning.
+
+A profile keeps the session *mode* (New / Continue / Resume) but never a session id, the Fork tick or a session name: those belong to one launch.
+
+## Sessions: recent, fork, name
+
+The **Session** box on the screen:
+
+| control | what it does |
+|---|---|
+| **New / Continue last / Resume…** | as before: a new session, `--continue`, or claude's own resume picker (`--resume` without an id; type an id in the box below it to resume that one). |
+| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
+| **Fork** | adds `--fork-session`: Claude continues the chosen conversation under a new session id and leaves the original as it was. Enabled when a session id is chosen (Recent or typed) and with Continue. |
+| **Name** | always visible; passed as `--name <name>` (shown in Claude's prompt box, `/resume` picker and terminal title). |
+
+How Name is filled in:
+
+* **New:** empty. Pressing Enter to launch with it empty doesn't launch yet: the cursor moves to Name with *Name this session (Enter again to launch without a name)*. Type a name and press Enter, or just press Enter again to launch unnamed. It asks once per screen.
+* **Resume a recent session:** its current name (your `/rename` name, else Claude's AI title). Edit it to rename the session.
+* **Fork:** `<original name> (fork)`, or `fork of <short id>` when the session has no name.
+* **Continue:** empty and optional.
+* Whatever you type yourself is kept when you change the choice; only what cm filled in is replaced.
+
+The preview shows the session line, e.g. `Session: fork of FORCE Kafka reconciliation → "Kafka retry"`, and the command ends with `… --fork-session --name 'Kafka retry' --resume <id>`.
+
+From the command line:
+
+```bash
+cm --sessions                  # id, age, name of this project's last sessions (recent_sessions, default 3)
+cm --sessions 10 --json        # more, machine-readable (name_source: custom / ai / prompt)
+cm --resume <id> --name "New name"         # resume and rename
+cm --resume <id> --fork --name "Variant B" # fork into a new, named session
+cm --continue --fork                       # fork the last conversation
+cm --mcp none --name "Scratch"             # headless launches never ask for a name
+```
+
+* `--name NAME` has only a long form, because `-n` is cm's `--dry-run`. It is not a selection flag: `cm --name X` alone still opens the screen, with Name filled in.
+* `--fork` needs `--resume <id>` or `--continue`; anything else (including `--resume` without an id) is an error.
+* A name given both to cm and after `--` (`--name`/`-n`) is an error rather than two names. One given only after `--` is passed through as usual.
+* `--fork-session` and `--name` go right before `--resume`, which stays last.
+
+**`--name` with `--resume` renames the session.** This was checked by reading Claude Code 2.1.281's own code, not by running a session. `--name` sets the session's title outright, while restoring a resumed (or forked) session only fills in its stored title when none is set yet, so the name you pass wins whichever happens first. Claude then writes it to the transcript as a `custom-title` record (the record `/rename` writes) when it re-appends the session's metadata. With `--fork-session` the name belongs to the new session, and the original keeps its own. If another *running* session on the same machine already uses that name, Claude may add a suffix to it.
+
+**Where the list comes from.** cm reads Claude Code's own session transcripts, `~/.claude/projects/<project>/<session id>.jsonl` (`$CLAUDE_CONFIG_DIR/projects/…` when set), **read-only**: it never writes, renames, locks or deletes anything there, and shows only names, ids and times, never conversation content beyond the shortened first prompt used as a last-resort name. This file format is **not documented** by Anthropic; cm follows what Claude Code 2.1.281 writes:
+
+* `<project>` is the absolute working directory with every character other than `A–Z a–z 0–9` replaced by `-` (paths longer than 200 characters are cut and get a hash suffix, as Claude does). Only that directory is read, so only the current project's sessions appear.
+* Only top-level `*.jsonl` files count; subdirectories (subagents, tool output) and `agent-*.jsonl` are skipped, as are empty files, files with only subagent (sidechain) records, and sessions with no real prompt or reply (e.g. just `/mcp`).
+* The name is the last `custom-title` record (from `/rename` or `--name`; an empty one means cleared), else the last `ai-title`, else the first real prompt shortened to 60 characters. The last activity is the newest record `timestamp` (else the file's modification time).
+* Each file is read from the end first (titles are re-appended near the end), in windows of at most 1 MB from the end and 64 KB from the start, so large transcripts stay cheap. The screen reads them in a background worker and never waits for them.
+* Unknown record types and malformed lines are ignored. If no file can be understood at all, the selector and `cm --sessions` say `unavailable` and everything else works as before.
 
 ## claude.ai connectors
 
@@ -348,7 +404,7 @@ Set `"INSTALL_AGENT_MEMORY": "0"` in `config.json` if you don't want to be offer
 CMUX_COMPUTER_USE_MCP_DISABLED=1 [CMUX_CLAUDE_PID=<cm's pid> [CM_CUA_SESSION=<cm's pid>] CMUX_CUA_SOCKET_AUTH_TOKEN=‹env only›] \
 claude [--strict-mcp-config] [--mcp-config=~/.claude-launcher/sessions/<id>/mcp.json] \
        --settings ~/.claude-launcher/sessions/<id>/settings.json [--model …] [--dangerously-skip-permissions] \
-       [--continue] [<args after -->] [--resume [id]]
+       [--continue] [<args after -->] [--fork-session] [--name <name>] [--resume [id]]
 ```
 
 * `claude` is whatever is on PATH (inside cmux, cmux's wrapper). Override it with `--claude-bin` or `CM_CLAUDE_BIN`.
@@ -361,7 +417,7 @@ claude [--strict-mcp-config] [--mcp-config=~/.claude-launcher/sessions/<id>/mcp.
 * If the session files can't be written there (a read-only or foreign-owned `sessions/`), cm warns `session files won't survive a cmux restore: <reason>` and falls back to a private temporary directory that is deleted when Claude exits. When the directory belongs to another user (typically after running cm with `sudo`), the message says which `chown` or `rm` fixes it.
 * `cm --measure` and `scripts/smoke_verify.py` still use throwaway temporary directories.
 * The command is an argv list; no shell is involved. cm waits as the parent process: Ctrl+C and Ctrl+\ reach Claude through the terminal, SIGTERM and SIGHUP are forwarded, and Claude's exit code is passed through (128+N for a signal).
-* `--mcp-config` is always passed as a single `--mcp-config=<path>` token, and `--resume` with no id is placed last, so neither can swallow a forwarded argument.
+* `--mcp-config` is always passed as a single `--mcp-config=<path>` token, and `--resume` with no id is placed last, so neither can swallow a forwarded argument. `--fork-session` and `--name <name>` go just before it; the name is one argv element, however it is spelled.
 
 <details>
 <summary><b>Control matrix: what each Claude Code mechanism actually does (verified on 2.1.281)</b></summary>
@@ -418,7 +474,7 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 * So **use `${VAR}` references for secrets** in server files (`"Authorization": "Bearer ${GITHUB_PAT}"`). A literal secret in a server's `env` or `headers` has to reach Claude, so it is copied into the session file and stays there until the directory is cleaned up.
 * The cmux-cua token only ever goes into Claude's environment, never into argv or a file. The session file's `/bin/sh` shim only names the variables and reads the token file when the server starts.
 * On a cmux restore, cmux replays only the command line. The environment cm set is **not** replayed: `CMUX_CUA_SOCKET_AUTH_TOKEN`, `CMUX_COMPUTER_USE_MCP_DISABLED=1`, `CMUX_CLAUDE_PID` and `CM_CUA_SESSION`. The token is recovered by the shim from `$CMUX_CUA_AUTH_TOKEN_FILE`, which cmux sets in its terminals. In deny-list mode (no `--strict-mcp-config`) the wrapper also injects its own `cmux-cua`, so a restored session can have two definitions with that name; which one Claude Code uses is unverified (both point at the same client and socket). If you didn't select cmux, `deniedMcpServers` blocks the name anyway.
-* cm writes only to its config home (including `sessions/`) and, for `cm --measure`, temporary directories, plus, if you agree during `cm setup agentmemory`, the npm global install and one launchd/systemd user unit. It never changes your shell profile, `~/.claude.json`, `~/.claude/settings.json`, AgentMemory data or session transcripts. Note that uv's official installer, which `install.sh` runs only when uv is missing, adds uv to your shell PATH.
+* cm writes only to its config home (including `sessions/`) and, for `cm --measure`, temporary directories, plus, if you agree during `cm setup agentmemory`, the npm global install and one launchd/systemd user unit. It never changes your shell profile, `~/.claude.json`, `~/.claude/settings.json`, AgentMemory data or session transcripts. It *reads* this project's transcripts (`~/.claude/projects/<project>/*.jsonl`) for the Recent list, read-only and bounded, and shows only session names, ids and times from them (see [Sessions](#sessions-recent-fork-name)). Note that uv's official installer, which `install.sh` runs only when uv is missing, adds uv to your shell PATH.
 
 ## Troubleshooting
 
@@ -441,6 +497,8 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 * Connector selection relies on the deny list whenever a connector is ticked (see [claude.ai connectors](#claudeai-connectors)).
 * cmux computer-use **calls** need cmux's helper and auth token. cm only makes the tools available.
 * A cmux restore replays the command line but not the environment cm set (see [Security](#security)), and it fails once the session's files have been cleaned up after `session_retention_days` without use.
+* The Recent list depends on Claude Code's undocumented transcript format (verified on 2.1.281). A future format change makes it say `unavailable` rather than break cm, but it may then list nothing until cm is updated.
+* A cmux restore replays the original command line. For a session started as a fork that line contains `--fork-session`; whether cmux drops it when it adds its own `--resume <id>` is up to cmux and not verified, so a restore could fork once more.
 * Built-in plugins can't be disabled per session. Measured costs come from Haiku and differ slightly on other models.
 * A real Linux run of the installer and of `cm setup agentmemory`'s systemd step is covered by tests with stubbed commands, but not by CI on a Linux machine yet.
 

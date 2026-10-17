@@ -58,6 +58,8 @@ class Selection:
     permissions: str = "standard"
     session: str = "new"
     resume_id: str | None = None
+    fork: bool = False  # --fork-session (needs a resume id or continue)
+    name: str | None = None  # --name, the session's display name
     extra_args: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +89,30 @@ class LaunchPlan:
 
 class PlanError(ValueError):
     pass
+
+
+# Per-launch values: never stored in a profile.
+LAUNCH_ONLY = ("resume_id", "fork", "name")
+
+
+def session_name(sel: Selection) -> str | None:
+    """The --name value: trimmed, None when empty. Control characters are rejected."""
+    name = (sel.name or "").strip()
+    if not name:
+        return None
+    if any(ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in name):
+        raise PlanError("the session name must be a single line without control characters")
+    return name
+
+
+def passthrough_name(args: list[str]) -> bool:
+    """Whether the arguments forwarded after `--` already name the session (claude's -n/--name)."""
+    return any(a in ("--name", "-n") or a.startswith("--name=") for a in args)
+
+
+def can_fork(sel: Selection) -> bool:
+    """--fork-session needs a session to fork: a resume id, or --continue."""
+    return sel.session == "continue" or (sel.session == "resume" and bool(sel.resume_id))
 
 
 def _merge(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
@@ -132,6 +158,11 @@ def build_plan(
         raise PlanError(f"unknown permissions {sel.permissions!r}")
     if sel.session not in SESSIONS:
         raise PlanError(f"unknown session mode {sel.session!r}")
+    if sel.fork and not can_fork(sel):
+        raise PlanError("fork needs a session to fork: a session id (--resume <id>) or --continue")
+    name = session_name(sel)
+    if name and passthrough_name(sel.extra_args):
+        raise PlanError("the session is named twice (--name and a --name/-n after --); keep only one")
 
     # --- MCP servers --------------------------------------------------------
     servers: dict[str, Any] = {}
@@ -230,6 +261,10 @@ def build_plan(
     if sel.session == "continue":
         argv.append("--continue")
     argv += list(sel.extra_args)
+    if sel.fork:
+        argv.append("--fork-session")
+    if name:
+        argv += ["--name", name]  # a required option value: claude takes it even if it starts with "-"
     if sel.session == "resume":
         # --resume takes an optional value; keep it last so it never eats a forwarded arg
         argv += ["--resume", sel.resume_id] if sel.resume_id else ["--resume"]

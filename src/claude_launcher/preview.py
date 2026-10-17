@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from rich.text import Text
 
 from . import costs as costs_mod
 from . import sessions as sessions_mod
 from .catalog import Catalog
 from .paths import tilde
-from .plan import LaunchPlan, Selection, build_plan
+from .plan import LaunchPlan, PlanError, Selection, build_plan, passthrough_name, session_name
 from .redact import MASK, redact_mcp_doc, redact_settings, shell_join
 
 
@@ -24,6 +26,30 @@ def session_note(plan: LaunchPlan) -> str:
     if not sessions_mod.is_session_name(d.name):  # a throwaway dir (measurement probes, smoke script)
         return f"{tilde(d)}/ (temporary)"
     return f"{tilde(d)}/ ({state}; kept after exit for cmux restore; each start or resume marks it used)"
+
+
+def session_line(sel: Selection, titles: Mapping[str, str] | None = None) -> str:
+    """new / continue / resume <name> / fork of <name>, then → "<new name>" when one is passed.
+    `titles` maps session ids to their current names (unknown ids show as a short id)."""
+    titles = titles or {}
+    if sel.session == "continue":
+        base = "fork of the last session" if sel.fork else "continue the last session"
+    elif sel.session == "resume" and sel.resume_id:
+        label = titles.get(sel.resume_id) or sel.resume_id[:8]
+        base = f"{'fork of' if sel.fork else 'resume'} {label}"
+    elif sel.session == "resume":
+        base = "resume (claude's picker)"
+    else:
+        base = "new"
+    try:
+        name = session_name(sel)
+    except PlanError:
+        name = None
+    if name:
+        return f'{base} → "{name}"'
+    if passthrough_name(sel.extra_args):
+        return f"{base} (named by the arguments after --)"
+    return f"{base} (unnamed)" if sel.session == "new" or sel.fork else base
 
 
 def env_line(plan: LaunchPlan) -> str:
@@ -49,7 +75,7 @@ DEFAULT_PALETTE = {"cmd": "cyan", "ok": "green", "warn": "yellow", "bad": "red",
 
 
 def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost],
-           palette: dict[str, str] | None = None) -> Text:
+           palette: dict[str, str] | None = None, titles: Mapping[str, str] | None = None) -> Text:
     c = palette or DEFAULT_PALETTE
     t = Text()
     t.append("Command\n", style="bold")
@@ -59,6 +85,8 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
         "deny-list (connectors selected; everything else blocked by name)"
     t.append("Isolation: ", style="bold")
     t.append(mode + "\n", style=c["ok"] if plan.mode == "strict" else c["warn"])
+    t.append("Session: ", style="bold")
+    t.append(session_line(sel, titles) + "\n")
     t.append("Session files: ", style="bold")
     t.append(session_note(plan) + "\n", style="dim")
 
@@ -92,10 +120,10 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
 
 
 def plain(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost], *,
-          show_files: bool = False) -> str:
+          show_files: bool = False, titles: Mapping[str, str] | None = None) -> str:
     import json
 
-    out = render(cat, sel, plan, costs).plain
+    out = render(cat, sel, plan, costs, titles=titles).plain
     if show_files:
         out += f"\n{tilde(plan.mcp_path)} (0600):\n" + json.dumps(redact_mcp_doc(plan.mcp_doc), indent=2,
                                                                  ensure_ascii=False)

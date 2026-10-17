@@ -305,3 +305,18 @@ def test_single_folder_string_in_migration_and_config(bare_home):
     assert cfg["mcp_folders"] == ["~/.claude-launcher/mcps", "~/mine"]
     assert config.mcp_folders({"mcp_folders": "~/mine"}) == [bare_home / "mine"]
     assert config.mcp_folders({"mcp_folders": 5}) == []  # unusable value: no crash
+
+
+@pytest.mark.parametrize("raw,want,warned", [
+    (None, 3, False), (5, 5, False), (0, 0, False), (50, 50, False),
+    (51, 3, True), (-1, 3, True), ("4", 3, True), (True, 3, True), (2.5, 3, True),
+])
+def test_recent_sessions_setting(raw, want, warned):
+    warnings = []
+    cfg = {} if raw is None else {"recent_sessions": raw}
+    assert config.recent_sessions(cfg, warnings) == want
+    assert bool(warnings) == warned
+
+
+def test_example_config_documents_recent_sessions():
+    assert any(line.startswith("recent_sessions:") for line in config.example_config()["_comment"])

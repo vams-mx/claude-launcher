@@ -11,7 +11,7 @@ from pathlib import Path
 from . import config as cfg_mod
 from .catalog import Catalog
 from .paths import config_dir
-from .plan import Selection
+from .plan import LAUNCH_ONLY, Selection
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 
@@ -47,14 +47,16 @@ def load(name: str) -> Selection:
         raise ProfileError(f"profile {name!r} is not valid JSON: {exc}") from None
     if not isinstance(doc, dict):
         raise ProfileError(f"profile {name!r} is not a JSON object ({p})")
-    return Selection.from_dict(doc)
+    # a hand-edited profile can't pin a conversation, a fork or a session name either
+    return Selection.from_dict({k: v for k, v in doc.items() if k not in LAUNCH_ONLY})
 
 
 def save(name: str, sel: Selection) -> Path:
     p = _path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     data = sel.to_dict()
-    data.pop("resume_id", None)  # a specific conversation id isn't a reusable preference
+    for k in LAUNCH_ONLY:  # a conversation id, a fork or a session name isn't a reusable preference
+        data.pop(k, None)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, p)

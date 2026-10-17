@@ -3,6 +3,12 @@
 One screen: grouped checklists on the left, model / permissions / session /
 profiles on the right, and a live preview (exact command, isolation mode,
 estimated context cost, warnings) at the bottom. Space toggles, Enter launches.
+
+The Session box: New / Continue / Resume… (claude's picker), a Recent selector
+(this project's last sessions, read off the UI thread by recent.py; picking one
+means "resume that id"), Fork (--fork-session) and Name (--name). Name is
+pre-filled for a resumed or forked session; launching a new session with an
+empty name asks once first.
 """
 
 from __future__ import annotations
@@ -15,21 +21,23 @@ from textual.binding import Binding
 from textual.timer import Timer
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
-    Button, Footer, Header, Input, Label, RadioButton, RadioSet, Select, SelectionList, Static,
+    Button, Checkbox, Footer, Header, Input, Label, RadioButton, RadioSet, Select, SelectionList, Static,
 )
 from textual.widgets.selection_list import Selection as Item
 
 from . import compat, health, profiles
 from . import config as config_mod
+from . import recent as recent_mod
 from . import themes
 from . import costs as costs_mod
 from .catalog import Catalog, Connector, discover_connectors, refresh_connectors
-from .plan import PlanError, Selection
+from .plan import PlanError, Selection, can_fork, passthrough_name
 from .preview import preview_plan, render
 
 MODEL_LABELS = {"default": "Default", "sonnet": "Sonnet", "opus": "Opus", "haiku": "Haiku"}
 PERM_LABELS = {"standard": "Standard (ask before acting)", "skip": "⚠ Skip permissions (--dangerously-skip-permissions)"}
 SESSION_LABELS = {"new": "New session", "continue": "Continue last (--continue)", "resume": "Resume… (native picker)"}
+NAME_NUDGE = "Name this session (Enter again to launch without a name)"
 
 def _edge(options: list, last: bool) -> int | None:
     """Index of the first (or last) enabled option, or None if none is enabled."""
@@ -107,6 +115,9 @@ RadioSet { width: 100%; border: round $panel; }
 RadioSet:focus { border: round $accent; background: $boost; }
 #perm RadioButton.danger { color: $error; }
 #resume_id { margin-top: 0; }
+#recent { margin-top: 0; }
+#fork { width: 100%; }
+#name_note { color: $warning; }
 #profile_row { height: auto; }
 #profile_row Input { width: 1fr; }
 #profile_row Button { min-width: 8; margin-left: 1; }
@@ -143,6 +154,13 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.plan_ok = True
         self.refresh_on_start = auto_refresh
         self._armed_delete: str | None = None  # profile name armed by a first Delete press
+        cfg_warnings: list[str] = []
+        self.recent_limit = config_mod.recent_sessions(config_mod.load_config(), cfg_warnings)
+        self.notes.extend(cfg_warnings)
+        self.recent: recent_mod.Recent | None = None  # None until the worker has read the sessions
+        self.known: dict[str, recent_mod.RecentSession] = {}  # listed sessions (+ the initial --resume id)
+        self._autoname = ""  # the Name value cm filled in last; anything else was typed and is kept
+        self._name_asked = False  # the empty-name nudge was shown (next Enter launches unnamed)
         self._disarm_timer: Timer | None = None
         for t in themes.CUSTOM:
             self.register_theme(t)
@@ -180,8 +198,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                 with FlowRadioSet(id="session"):
                     for k, v in SESSION_LABELS.items():
                         yield RadioButton(v, value=self.sel.session == k, name=k)
+                recent_box = FlowSelect([], prompt="Recent: reading…", id="recent",
+                                        allow_blank=True, disabled=True)
+                recent_box.display = self.recent_limit > 0
+                yield recent_box
                 yield Input(placeholder="resume: session id (blank = picker)", id="resume_id",
                             value=self.sel.resume_id or "")
+                yield Checkbox("Fork (--fork-session)", value=self.sel.fork, id="fork")
+                yield Input(placeholder="Session name (--name)", id="name", value=self.sel.name or "")
+                yield Static("", classes="note", id="name_note")
                 yield Label("Profile", classes="group")
                 yield FlowSelect([(p, p) for p in profiles.list_profiles()], prompt="load profile…",
                              id="profile", allow_blank=True,
@@ -200,13 +225,16 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
     def on_mount(self) -> None:
         self.sub_title = str(self.cat.cwd)
-        self._sync_resume_visibility()
+        self.query_one("#name_note", Static).display = False
+        self._sync_session()
         self._update_preview()
         self.query_one("#local", SelectionList).focus()
         for n in self.notes:
             self.notify(n, severity="warning", timeout=6)
         self._check_health()
         self._check_version()
+        if self.recent_limit > 0:
+            self._load_recent(self.sel.resume_id if self.sel.session == "resume" else None)
         self.theme_changed_signal.subscribe(self, self._on_theme_changed)
         if self.refresh_on_start:
             self.action_refresh_connectors()
@@ -318,7 +346,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         conns = vals("connectors")
         plugins = vals("plugins")
         # keep catalog order for stable previews
-        return Selection(
+        sel = Selection(
             local=[s.name for s in self.cat.local if s.name in local],
             connectors=[c.name for c in self.cat.connectors if c.name in conns],
             plugins=[p.id for p in self.cat.plugins if p.id in plugins],
@@ -327,8 +355,12 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             permissions=radio("perm", "standard"),
             session=radio("session", "new"),
             resume_id=(self.query_one("#resume_id", Input).value.strip() or None),
+            name=(self.query_one("#name", Input).value.strip() or None),
             extra_args=list(self.sel.extra_args),
         )
+        # a ticked Fork only counts while there is something to fork (it is greyed out otherwise)
+        sel.fork = self.query_one("#fork", Checkbox).value and can_fork(sel)
+        return sel
 
     def _update_preview(self) -> None:
         self.sel = self._read_selection()
@@ -344,10 +376,72 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             return
         self.plan_ok = True
         pv.remove_class("error")
-        pv.update(render(self.cat, self.sel, plan, self.costs, self._palette()))
+        pv.update(render(self.cat, self.sel, plan, self.costs, self._palette(), titles=self._titles()))
 
-    def _sync_resume_visibility(self) -> None:
-        self.query_one("#resume_id", Input).display = self._read_selection().session == "resume"
+    # ------------------------------------------------------------------ session box
+    def _titles(self) -> dict[str, str]:
+        return {sid: s.name for sid, s in self.known.items()}
+
+    def _recent_ids(self) -> set[str]:
+        return {s.id for s in self.recent.sessions} if self.recent else set()
+
+    def _suggested_name(self, sel: Selection) -> str:
+        """Resume: the session's current name. Fork: "<name> (fork)", or "fork of <short id>"."""
+        if sel.session != "resume" or not sel.resume_id:
+            return ""
+        s = self.known.get(sel.resume_id)
+        title = s.title if s else None  # a first-prompt fallback is not a name
+        if sel.fork:
+            return f"{title} (fork)" if title else f"fork of {sel.resume_id[:8]}"
+        return title or ""
+
+    def _sync_session(self) -> None:
+        """Everything derived from the session choice: resume id box, Fork, the pre-filled Name.
+        Idempotent; every change that matters fires an event that calls it again, so it converges
+        even while a radio change is still in flight."""
+        sel = self._read_selection()
+        self.query_one("#resume_id", Input).display = sel.session == "resume"
+        self.query_one("#fork", Checkbox).disabled = not can_fork(sel)
+        suggestion = self._suggested_name(sel)
+        name = self.query_one("#name", Input)
+        if (not name.value.strip() or name.value == self._autoname) and name.value != suggestion:
+            name.value = suggestion
+        self._autoname = suggestion
+
+    def _recent_row(self, s: recent_mod.RecentSession) -> Text:
+        t = Text(recent_mod.shorten(s.name, 40), style="" if s.custom else "italic")
+        t.append(f" · {s.age()}", style="dim")
+        return t
+
+    @work(thread=True, exclusive=True, group="recent")
+    def _load_recent(self, resume_id: str | None) -> None:
+        # Claude's transcripts can be large: read them (bounded, read-only) off the UI thread
+        res = recent_mod.list_recent(self.cat.cwd, self.recent_limit)
+        extra = None
+        if resume_id and resume_id not in {s.id for s in res.sessions}:
+            extra = recent_mod.find(self.cat.cwd, resume_id)
+        self.call_from_thread(self._apply_recent, res, extra)
+
+    def _apply_recent(self, res: recent_mod.Recent, extra: recent_mod.RecentSession | None) -> None:
+        self.recent = res
+        self.known = {s.id: s for s in res.sessions}
+        if extra:
+            self.known[extra.id] = extra
+        box = self.query_one("#recent", Select)
+        if res.status == "ok":
+            box.set_options([(self._recent_row(s), s.id) for s in res.sessions])
+            box.prompt = f"Recent: pick 1 of {len(res.sessions)} sessions…"
+            box.disabled = False
+            rid = self.query_one("#resume_id", Input).value.strip()
+            if self._read_selection().session == "resume" and rid in self._recent_ids():
+                box.value = rid
+        elif res.status == "empty":
+            box.prompt = "Recent: none in this project yet"
+        else:
+            box.prompt = "Recent: unavailable (see cm --sessions)"
+            self.notify(f"recent sessions unavailable: {res.reason}", severity="warning", timeout=6)
+        self._sync_session()
+        self._update_preview()
 
     def _rebuild_connectors(self) -> None:
         sl = self.query_one("#connectors", SelectionList)
@@ -370,7 +464,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             for b in self.query_one(f"#{wid}", RadioSet).query(RadioButton):
                 if b.name == value:
                     b.value = True
-        self._sync_resume_visibility()
+        self._sync_session()
         self._update_preview()
 
     # ------------------------------------------------------------------ events
@@ -379,12 +473,52 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self._update_preview()
 
     @on(RadioSet.Changed)
-    def _rs_changed(self) -> None:
-        self._sync_resume_visibility()
+    def _rs_changed(self, event: RadioSet.Changed) -> None:
+        if event.radio_set.id == "session" and event.pressed.name != "resume":
+            box = self.query_one("#recent", Select)
+            if box.value is not Select.NULL:
+                box.clear()  # New / Continue: no recent session is chosen any more
+        self._sync_session()
+        self._update_preview()
+
+    @on(Select.Changed, "#recent")
+    def _recent_changed(self, event: Select.Changed) -> None:
+        rid = self.query_one("#resume_id", Input)
+        if event.value is Select.NULL:
+            # Cleared by hand: back to claude's picker. (cm clears it itself only when the choice no
+            # longer applies, i.e. on New / Continue or another typed id; then this is a no-op or harmless.)
+            if rid.value.strip() in self._recent_ids():
+                rid.value = ""
+        else:
+            for b in self.query_one("#session", RadioSet).query(RadioButton):
+                if b.name == "resume" and not b.value:
+                    b.value = True
+            if rid.value != event.value:
+                rid.value = str(event.value)
+        self._sync_session()
         self._update_preview()
 
     @on(Input.Changed, "#resume_id")
-    def _resume_changed(self) -> None:
+    def _resume_changed(self, event: Input.Changed) -> None:
+        box = self.query_one("#recent", Select)
+        value = event.value.strip()
+        if value in self._recent_ids():
+            if box.value != value:
+                box.value = value
+        elif box.value is not Select.NULL:
+            box.clear()
+        self._sync_session()
+        self._update_preview()
+
+    @on(Checkbox.Changed, "#fork")
+    def _fork_changed(self) -> None:
+        self._sync_session()
+        self._update_preview()
+
+    @on(Input.Changed, "#name")
+    def _name_changed(self, event: Input.Changed) -> None:
+        if event.value.strip():
+            self.query_one("#name_note", Static).display = False
         self._update_preview()
 
     @on(Select.Changed, "#profile")
@@ -499,6 +633,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         if not self.plan_ok:
             self.bell()
             self.notify("fix the error shown in the preview first", severity="error")
+            return
+        if (self.sel.session == "new" and not self.sel.name and not passthrough_name(self.sel.extra_args)
+                and not self._name_asked):
+            # Ask once: the next Enter (now in the Name box) launches, named or not.
+            self._name_asked = True
+            note = self.query_one("#name_note", Static)
+            note.update(NAME_NUDGE)
+            note.display = True
+            self.query_one("#name", Input).focus()
             return
         self.exit(("launch", self.sel))
 

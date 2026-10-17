@@ -133,7 +133,8 @@ def test_cmux_entry_uses_claudes_pid_and_keeps_the_token_out_of_files(catalog):
     # exports its own PID (Claude's parent) for direct launches. No PID is written into the file.
     assert entry["CMUX_CUA_STATE_OWNER_PID"] == "${CMUX_CLAUDE_PID:-}"
     assert p.env_overrides["CMUX_CLAUDE_PID"] == "99"
-    assert "99" not in json.dumps(p.mcp_doc)
+    # the owner PID (99) is never written as a value (the doc also holds pytest's tmp path, which may contain "99")
+    assert not any(str(v) == "99" or str(v).endswith("-99") for v in entry.values())
     assert "--strict-mcp-config" in p.argv  # isolation is kept
     assert p.env_overrides["CMUX_COMPUTER_USE_MCP_DISABLED"] == "1"
     assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] == CUA_TOKEN and CUA_TOKEN not in json.dumps(p.mcp_doc)
@@ -182,3 +183,54 @@ def test_documents_are_identical_across_launches(catalog, fake_home, monkeypatch
     for per_launch in ("987651", "987652", "987653", "SURFACE-1", "SURFACE-OTHER", "cm-session-"):
         assert per_launch not in blob
     assert second.env_overrides["CMUX_CLAUDE_PID"] == "987652"
+
+
+# --- fork and session name -----------------------------------------------------
+
+
+def test_fork_and_name_go_right_before_resume(catalog):
+    p = plan_for(catalog, session="resume", resume_id="abc-1", fork=True, name="Kafka retry",
+                 extra_args=["--verbose"])
+    assert p.argv[-6:] == ["--verbose", "--fork-session", "--name", "Kafka retry", "--resume", "abc-1"]
+    p = plan_for(catalog, session="continue", fork=True)
+    assert p.argv[-2:] == ["--continue", "--fork-session"]
+    p = plan_for(catalog, name="  New thing ")
+    assert p.argv[-2:] == ["--name", "New thing"]  # trimmed, one argv element, no shell
+    p = plan_for(catalog, name="-dash first")
+    assert p.argv[-2:] == ["--name", "-dash first"]  # a required option value: claude takes it as is
+    assert "--name" not in plan_for(catalog, name="   ").argv
+
+
+@pytest.mark.parametrize("kw", [
+    {"fork": True},  # new
+    {"fork": True, "session": "resume"},  # claude's picker: nothing chosen to fork
+])
+def test_fork_needs_something_to_fork(catalog, kw):
+    with pytest.raises(PlanError, match="fork needs a session"):
+        plan_for(catalog, **kw)
+
+
+def test_bad_or_duplicate_names_are_rejected(catalog):
+    with pytest.raises(PlanError, match="control characters"):
+        plan_for(catalog, name="two\nlines")
+    for extra in (["--name", "x"], ["--name=x"], ["-n", "x"]):
+        with pytest.raises(PlanError, match="named twice"):
+            plan_for(catalog, name="mine", extra_args=extra)
+    assert plan_for(catalog, extra_args=["--name", "x"]).argv[-2:] == ["--name", "x"]  # only one name: fine
+
+
+def test_session_line(catalog):
+    from claude_launcher.preview import session_line
+
+    titles = {"abc-12345678": "FORCE Kafka"}
+    assert session_line(Selection()) == "new (unnamed)"
+    assert session_line(Selection(name="X")) == 'new → "X"'
+    assert session_line(Selection(session="continue")) == "continue the last session"
+    assert session_line(Selection(session="continue", fork=True, name="Y")) == 'fork of the last session → "Y"'
+    assert session_line(Selection(session="resume")) == "resume (claude's picker)"
+    assert session_line(Selection(session="resume", resume_id="abc-12345678"), titles) == "resume FORCE Kafka"
+    assert session_line(Selection(session="resume", resume_id="abc-12345678", fork=True, name="F2"), titles) == \
+        'fork of FORCE Kafka → "F2"'
+    unknown = Selection(session="resume", resume_id="zzz-99999999", fork=True)
+    assert session_line(unknown) == "fork of zzz-9999 (unnamed)"
+    assert session_line(Selection(extra_args=["-n", "x"])) == "new (named by the arguments after --)"

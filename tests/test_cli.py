@@ -175,3 +175,123 @@ def test_interactive_path_does_not_wait_for_claude_version(fake_home, monkeypatc
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(tui, "run_tui", lambda cat, sel, **kw: None)
     assert run() == 0
+
+
+# --- recent sessions, --fork, --name -----------------------------------------------
+
+
+def test_sessions_lists_this_project(fake_home, capsys):
+    from tests.conftest import SID, standard_sessions
+
+    standard_sessions(fake_home.project)
+    assert run("--sessions") == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3  # recent_sessions default
+    assert lines[0].startswith(SID[0]) and "2 h ago" in lines[0] and lines[0].endswith("FORCE Kafka reconciliation")
+    assert lines[1].endswith("Red build triage  (AI title)")
+    assert lines[2].startswith(SID[2]) and lines[2].endswith("(first prompt)")
+    assert run("--sessions", "10", "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["status"] == "ok" and [s["id"] for s in doc["sessions"]] == SID
+    assert doc["sessions"][0]["custom_name"] is True and doc["sessions"][1]["name_source"] == "ai"
+
+
+def test_sessions_follows_recent_sessions_and_cwd(fake_home, capsys):
+    from claude_launcher import config
+    from tests.conftest import SID, rec_assistant, rec_user, standard_sessions, write_session
+
+    standard_sessions(fake_home.project)
+    config.save_config({"recent_sessions": 2})
+    assert run("--sessions", "--json") == 0
+    assert len(json.loads(capsys.readouterr().out)["sessions"]) == 2
+    config.save_config({"recent_sessions": 0})  # hides the screen's selector only
+    assert run("--sessions", "--json") == 0
+    assert len(json.loads(capsys.readouterr().out)["sessions"]) == 3
+    other = fake_home.tmp / "elsewhere"
+    other.mkdir()
+    assert run("--sessions", "--cwd", str(other)) == 0
+    assert "no recent sessions" in capsys.readouterr().err
+    write_session(other.resolve(), SID[3], [rec_user("there"), rec_assistant()])
+    assert run("--sessions", "--cwd", str(other), "--json") == 0
+    assert [s["id"] for s in json.loads(capsys.readouterr().out)["sessions"]] == [SID[3]]
+
+
+def test_sessions_unavailable_is_reported_not_a_crash(fake_home, capsys):
+    from tests.conftest import SID, write_session
+
+    write_session(fake_home.project, SID[0], [{"type": "v9-event"}])
+    assert run("--sessions") == 0
+    assert "unavailable" in capsys.readouterr().err
+    assert run("--sessions", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "unavailable"
+
+
+def test_fork_needs_resume_id_or_continue(fake_home, launched, capsys):
+    for args in (["--fork"], ["--fork", "--resume"], ["--fork", "--mcp", "none"]):
+        assert run(*args) == 2
+        assert "--fork needs a session to fork" in capsys.readouterr().err
+    assert not launched
+    assert run("--resume", "abc-1", "--fork") == 0 and launched[-1].fork and launched[-1].resume_id == "abc-1"
+    assert run("--continue", "--fork") == 0 and launched[-1].fork and launched[-1].session == "continue"
+
+
+def test_name_flag_headless_and_validation(fake_home, launched, capsys):
+    assert run("--mcp", "none", "--name", "  Release prep ") == 0  # headless: no prompt, just the name
+    assert launched[-1].name == "Release prep"
+    assert run("--mcp", "none") == 0 and launched[-1].name is None  # headless never asks for one
+    n = len(launched)
+    assert run("--mcp", "none", "--name", "  ") == 2
+    assert "non-empty" in capsys.readouterr().err
+    for extra in (["--name", "B"], ["--name=B"], ["-n", "B"]):
+        assert run("--mcp", "none", "--name", "A", "--", *extra) == 2
+        assert "named twice" in capsys.readouterr().err
+    assert run("--mcp", "none", "--name", "bad\x07name") == 2
+    assert len(launched) == n
+    assert run("--mcp", "none", "--", "--name", "only-here") == 0  # one name after --: passed through
+    assert launched[-1].extra_args == ["--name", "only-here"]
+
+
+def test_dry_run_shows_the_fork_argv_and_session_line(fake_home, launched, capsys):
+    from tests.conftest import SID, standard_sessions
+
+    standard_sessions(fake_home.project)
+    assert run("--dry-run", "--json", "--resume", SID[0], "--fork", "--name", "Kafka v2") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["argv"][-5:] == ["--fork-session", "--name", "Kafka v2", "--resume", SID[0]]
+    assert doc["session"] == 'fork of FORCE Kafka reconciliation → "Kafka v2"'
+    assert run("--dry-run", "--resume", SID[1]) == 0
+    assert "Session: resume Red build triage" in capsys.readouterr().out
+    assert not launched
+
+
+def test_name_alone_opens_the_screen_prefilled(fake_home, monkeypatch, launched):
+    import claude_launcher.tui as tui
+
+    seen = {}
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    def fake_tui(cat, sel, **kw):
+        seen["sel"] = sel
+        return sel
+
+    monkeypatch.setattr(tui, "run_tui", fake_tui)
+    assert run("--name", "From flag") == 0  # --name is not a selection flag: the screen still opens
+    assert seen["sel"].name == "From flag" and launched[-1].name == "From flag"
+
+
+def test_fork_uses_the_session_from_the_profile(fake_home, capsys):
+    # --fork is checked on the resolved selection: a profile's session ("continue") counts
+    profiles.save("cont", Selection(session="continue"))
+    profiles.set_default("cont")
+    assert run("--fork", "--dry-run") == 0
+    assert "--continue" in capsys.readouterr().out
+    profiles.set_default(None)
+    assert run("--fork", "--mcp", "none", "--dry-run") == 2  # still rejected without a session
+    assert "--fork needs a session to fork" in capsys.readouterr().err
+
+
+def test_sessions_rejects_a_negative_count(fake_home, capsys):
+    assert run("--sessions", "-5") == 2
+    assert "--sessions N must be 0 or more" in capsys.readouterr().err
+    assert run("--sessions") == 0  # no N: the config default

@@ -128,7 +128,7 @@ def test_tui_hides_cmux_group_and_still_works(no_cmux):
         await pilot.press("space")
         await pilot.press("ctrl+n")  # select none must not trip over the hidden group
         await pilot.press("space")
-        await pilot.press("enter")
+        await pilot.press("enter", "enter")  # the first Enter only asks for a session name
 
     result = _drive(app, steps)
     assert result[0] == "launch"

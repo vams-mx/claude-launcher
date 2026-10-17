@@ -30,7 +30,10 @@ def test_tick_agentmemory_and_gdrive_then_enter(catalog):
         await pilot.pause()
         preview = app.query_one("#preview", Static).render()
         assert "agentmemory, gdrive" in str(preview)
-        await pilot.press("enter")
+        await pilot.press("enter")  # no name yet: asks once instead of launching
+        await pilot.pause()
+        assert app.return_value is None and app.focused.id == "name"
+        await pilot.press("enter")  # the second Enter launches unnamed
 
     result = drive(app, steps)
     assert result[0] == "launch"
@@ -100,6 +103,7 @@ def test_load_profile_applies(catalog):
         app.query_one("#profile", Select).value = "both"
         await pilot.pause()
         await pilot.pause()
+        app.action_do_launch()  # a new session without a name: the first only asks for one
         app.action_do_launch()
 
     result = drive(app, steps)
@@ -137,6 +141,7 @@ def test_enter_in_profile_dropdown_selects_instead_of_launching(catalog):
         await pilot.pause()
         assert app.return_value is None and not sel.expanded
         assert sel.value == "b" and app.profile_name == "b"
+        app.action_do_launch()  # a new session without a name: the first only asks for one
         app.action_do_launch()
 
     result = drive(app, steps)
@@ -156,6 +161,7 @@ def test_unverified_connector_from_profile_survives_the_screen(catalog):
         app.query_one("#profile", Select).value = "mail"  # loading a profile later keeps it too
         await pilot.pause()
         await pilot.pause()
+        app.action_do_launch()  # a new session without a name: the first only asks for one
         app.action_do_launch()
 
     result = drive(app, steps)
@@ -194,6 +200,7 @@ def test_refresh_reads_connectors_off_the_ui_thread_and_updates_the_catalog_in_p
         assert "claude.ai Notion" in values and rows.selected == ["claude.ai Slack"]
         rows.select("claude.ai Notion")
         await pilot.pause()
+        app.action_do_launch()  # a new session without a name: the first only asks for one
         app.action_do_launch()
 
     result = drive(app, steps)
@@ -267,6 +274,7 @@ def test_theme_change_recolours_rows_and_keeps_the_selection(catalog):
         await pilot.pause()
         assert app._palette()["cmd"] == themes.PAPER.primary
         assert app.query_one("#local", SelectionList).selected == ["gdrive"]
+        app.action_do_launch()  # a new session without a name: the first only asks for one
         app.action_do_launch()
 
     assert drive(app, steps)[1].local == ["gdrive"]
@@ -368,11 +376,16 @@ def test_arrows_flow_from_box_to_box(catalog):
         for _ in range(len(list(session.query("RadioButton")))):
             await pilot.press("down")
             await pilot.pause()
-        assert app.focused.id == "profile"  # left the radio group instead of wrapping
+        # left the radio group instead of wrapping; Recent (no sessions here) and Fork (nothing
+        # to fork) are disabled, so the next stop is the Name box
+        assert app.focused.id == "name"
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.focused.id == "profile"
         await pilot.press("down")  # a closed Select passes Down on; it doesn't open
         await pilot.pause()
         assert not app.query_one("#profile", Select).expanded and app.focused.id == "profile_name"
-        await pilot.press("up", "up")
+        await pilot.press("up", "up", "up")
         await pilot.pause()
         assert app.focused.id == "session"
         assert app.return_value is None

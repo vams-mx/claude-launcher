@@ -6,6 +6,8 @@
   cm --connectors none|all|Slack,Todoist
   cm --plugins none|all|commit-commands
   cm --cmux / --no-mcp / --list / --where / --continue / --resume [id]
+  cm --resume <id> --fork --name "new name"    resume (or fork) a session, naming it
+  cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
   cm ... -- <args forwarded verbatim to claude>
   cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
   cm setup agentmemory            install and wire up AgentMemory (opt-in, asks first)
@@ -23,15 +25,16 @@ from pathlib import Path
 from . import __version__, compat
 from . import config as cfg_mod
 from . import costs as costs_mod
-from . import profiles, sessions
+from . import profiles, recent, sessions
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
 from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
-from .plan import MODELS, PlanError, Selection
+from .plan import MODELS, PlanError, Selection, can_fork, passthrough_name
 from .preview import plain, preview_plan
 from .redact import redact_server
 
 _RESUME_PICKER = "\0picker"
+_SESSIONS_DEFAULT = object()  # `--sessions` given without N: use recent_sessions from config.json
 
 
 def _split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -68,13 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-c", "--continue", dest="cont", action="store_true", help="continue the last conversation")
     g.add_argument("-r", "--resume", nargs="?", const=_RESUME_PICKER, metavar="ID",
                    help="resume by id, or open claude's native picker")
+    sel.add_argument("--fork", action="store_true",
+                     help="with --resume <id> or --continue: fork into a new session id (--fork-session)")
+    sel.add_argument("--name", metavar="NAME",
+                     help="session display name, passed as claude's --name (long form only: -n is --dry-run)")
     sel.add_argument("-i", "--interactive", action="store_true", help="open the screen even with flags given")
 
     info = p.add_argument_group("catalog, profiles and costs")
     info.add_argument("-l", "--list", action="store_true", help="show everything that can be selected")
     info.add_argument("--where", action="store_true",
                       help="show the config home, the MCP folders scanned and the file each server came from")
-    info.add_argument("--json", action="store_true", help="with --list, --where or --dry-run: machine-readable output")
+    info.add_argument("--sessions", nargs="?", type=int, const=_SESSIONS_DEFAULT, metavar="N",
+                      help="list this project's recent Claude Code sessions (id, name, age); "
+                           "N defaults to recent_sessions in config.json (3)")
+    info.add_argument("--json", action="store_true",
+                      help="with --list, --where, --sessions or --dry-run: machine-readable output")
     info.add_argument("-n", "--dry-run", action="store_true", help="print the launch preview, don't start claude")
     info.add_argument("--refresh", action="store_true", help="refresh the claude.ai connector list (claude mcp list)")
     info.add_argument("--measure", nargs="?", const="all", metavar="KEYS",
@@ -153,6 +164,8 @@ def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str
     if a.resume is not None:
         sel.session = "resume"
         sel.resume_id = None if a.resume == _RESUME_PICKER else a.resume
+    sel.fork = bool(a.fork)
+    sel.name = a.name.strip() if a.name is not None else None
     if passthrough:
         sel.extra_args = passthrough
     return sel, notes
@@ -213,6 +226,26 @@ def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> N
               f" · default: {profiles.get_default() or 'none'}[/dim]")
     for w in cat.warnings + notes:
         con.print(f"• {w}", markup=False, style="yellow")
+
+
+def print_sessions(cwd: Path, limit: int, as_json: bool) -> int:
+    """Names, ids and ages only: never conversation content (the fallback name is a shortened first prompt)."""
+    res = recent.list_recent(cwd, limit)
+    if as_json:
+        print(json.dumps({"cwd": str(cwd), "status": res.status, "reason": res.reason or None,
+                          "sessions": [s.to_json() for s in res.sessions]}, indent=2, ensure_ascii=False))
+        return 0
+    if res.status != "ok":
+        msg = f"no recent sessions for {tilde(cwd)}: {res.reason}" if res.status == "empty" else \
+            f"recent sessions unavailable: {res.reason}"
+        print(msg, file=sys.stderr)
+        return 0
+    marks = {"ai": "  (AI title)", "prompt": "  (first prompt)", "none": "  (no name)"}
+    ages = [s.age() for s in res.sessions]
+    w = max(len(x) for x in ages)
+    for s, ag in zip(res.sessions, ages, strict=True):
+        print(f"{s.id}  {ag:<{w}}  {s.name}{marks.get(s.source, '')}")
+    return 0
 
 
 def _describe_source(source: str) -> str:
@@ -371,6 +404,27 @@ def main(argv: list[str] | None = None) -> int:
         _err(str(exc))
         return 2
 
+    if a.sessions is not None:
+        cfg_warnings: list[str] = []
+        # recent_sessions: 0 only hides the screen's selector; an explicit `cm --sessions` still lists
+        if a.sessions is _SESSIONS_DEFAULT:
+            n = cfg_mod.recent_sessions(cfg_mod.load_config(), cfg_warnings) or cfg_mod.DEFAULT_RECENT_SESSIONS
+        elif a.sessions < 0:
+            _err("--sessions N must be 0 or more")
+            return 2
+        else:
+            n = a.sessions
+        for w in cfg_warnings:
+            _err(w)
+        return print_sessions(cwd, min(n, cfg_mod.MAX_RECENT_SESSIONS), a.json)
+
+    if a.name is not None and not a.name.strip():
+        _err("--name needs a non-empty name")
+        return 2
+    if a.name is not None and passthrough_name(passthrough):
+        _err("the session is named twice (--name and a --name/-n after --); keep only one")
+        return 2
+
     if a.refresh:
         try:
             found = refresh_connectors(claude_bin)
@@ -411,6 +465,10 @@ def main(argv: list[str] | None = None) -> int:
     except (PlanError, profiles.ProfileError) as exc:
         _err(str(exc))
         return 2
+    # checked on the resolved selection, so a profile's session ("continue") counts
+    if sel.fork and not can_fork(sel):
+        _err("--fork needs a session to fork: --resume <id> or --continue")
+        return 2
     headless = _selection_flags_given(a) and not a.interactive
 
     if not headless and not a.dry_run:
@@ -446,16 +504,20 @@ def main(argv: list[str] | None = None) -> int:
         vw = compat.check(claude_bin)
         if vw:
             plan.warnings.append(vw)
+        titles = {}
+        if sel.session == "resume" and sel.resume_id and (found := recent.find(cat.cwd, sel.resume_id)):
+            titles[found.id] = found.name
         if a.json:
-            from .preview import env_line
+            from .preview import env_line, session_line
             from .redact import redact_mcp_doc, redact_settings
 
             print(json.dumps({"argv": plan.argv, "env": env_line(plan), "mode": plan.mode,
+                              "session": session_line(sel, titles),
                               "session_dir": str(plan.mcp_path.parent),
                               "mcp": redact_mcp_doc(plan.mcp_doc), "settings": redact_settings(plan.settings_doc),
                               "denied": plan.denied, "warnings": plan.warnings}, indent=2))
         else:
-            print(plain(cat, sel, plan, costs_mod.load(), show_files=True))
+            print(plain(cat, sel, plan, costs_mod.load(), show_files=True, titles=titles))
         return 0
 
     if headless:

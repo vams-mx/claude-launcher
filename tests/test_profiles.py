@@ -49,3 +49,15 @@ def test_malformed_or_unreadable_profile_is_a_profile_error(fake_home, content):
         path.write_text(content)
     with pytest.raises(profiles.ProfileError, match="bad"):
         profiles.load("bad")
+
+
+def test_profiles_never_keep_a_session_id_fork_or_name(fake_home):
+    import json
+
+    profiles.save("p", Selection(session="resume", resume_id="abc", fork=True, name="Named", model="opus"))
+    doc = json.loads((profiles.profiles_dir() / "p.json").read_text())
+    assert not {"resume_id", "fork", "name"} & set(doc) and doc["model"] == "opus"
+    # a hand-edited profile can't pin them either
+    (profiles.profiles_dir() / "h.json").write_text(json.dumps({"resume_id": "x", "fork": True, "name": "n"}))
+    loaded = profiles.load("h")
+    assert (loaded.resume_id, loaded.fork, loaded.name) == (None, False, None)

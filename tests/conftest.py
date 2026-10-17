@@ -169,3 +169,67 @@ def fake_popen():
         return popen
 
     return make
+
+
+# ---------------------------------------------------------------------------
+# fake Claude Code transcripts (~/.claude/projects/<key>/<id>.jsonl)
+
+SID = ["11111111-aaaa-4aaa-8aaa-000000000001", "22222222-bbbb-4bbb-8bbb-000000000002",
+       "33333333-cccc-4ccc-8ccc-000000000003", "44444444-dddd-4ddd-8ddd-000000000004"]
+
+
+def ts(hours_ago: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    t = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def rec_user(text, hours_ago=1.0, **kw):
+    return {"parentUuid": None, "isSidechain": False, "type": "user", "message": {"role": "user", "content": text},
+            "uuid": "u", "timestamp": ts(hours_ago), "cwd": "/x", "sessionId": "s", **kw}
+
+
+def rec_assistant(hours_ago=1.0, **kw):
+    return {"parentUuid": "u", "isSidechain": False, "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+            "uuid": "a", "timestamp": ts(hours_ago), **kw}
+
+
+def rec_custom(title):
+    return {"type": "custom-title", "customTitle": title, "sessionId": "s"}
+
+
+def rec_ai(title):
+    return {"type": "ai-title", "aiTitle": title, "sessionId": "s"}
+
+
+def write_session(cwd, sid, records, *, hours_ago=None, raw_lines=()):
+    """Write a transcript for project `cwd`; mtime = `hours_ago` (default: the newest record)."""
+    import time
+    from claude_launcher import recent
+
+    d = recent.projects_root() / recent.project_key(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{sid}.jsonl"
+    lines = [json.dumps(r) for r in records] + list(raw_lines)
+    p.write_text("".join(line + "\n" for line in lines))
+    if hours_ago is not None:
+        t = time.time() - hours_ago * 3600
+        os.utime(p, (t, t))
+    return p
+
+
+def standard_sessions(cwd):
+    """Four sessions: custom name (2 h), AI title only (5 h), first prompt only (26 h), oldest (50 h)."""
+    write_session(cwd, SID[0], [rec_user("fix the kafka consumer", 3), rec_assistant(2.5), rec_ai("Kafka fix"),
+                                rec_custom("FORCE Kafka reconciliation"), rec_user("and the tests", 2.1),
+                                rec_assistant(2)], hours_ago=2)
+    write_session(cwd, SID[1], [rec_user("why is the build red", 6), rec_assistant(5), rec_ai("Red build triage")],
+                  hours_ago=5)
+    write_session(cwd, SID[2], [rec_user("<command-name>/mcp</command-name>", 27),
+                                rec_user("please summarise the release notes for version 4.2 of the payments "
+                                         "gateway and list every breaking change", 26.5),
+                                rec_assistant(26)], hours_ago=26)
+    write_session(cwd, SID[3], [rec_user("old one", 51), rec_assistant(50), rec_custom("Oldest named")],
+                  hours_ago=50)
