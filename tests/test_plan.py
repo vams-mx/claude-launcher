@@ -129,11 +129,15 @@ def test_companion_settings_merged_once(catalog, fake_home):
 def test_cmux_entry_uses_claudes_pid_and_keeps_the_token_out_of_files(catalog):
     p = plan_for(catalog, cmux=True)
     entry = p.mcp_doc["mcpServers"]["cmux-cua"]["env"]
-    # Claude Code expands this at launch; cmux's wrapper exports it as Claude's own PID.
-    assert entry["CMUX_CUA_STATE_OWNER_PID"] == "${CMUX_CLAUDE_PID:-99}"
+    # Claude Code expands this at launch; cmux's wrapper exports it as Claude's own PID, and cm
+    # exports its own PID (Claude's parent) for direct launches. No PID is written into the file.
+    assert entry["CMUX_CUA_STATE_OWNER_PID"] == "${CMUX_CLAUDE_PID:-}"
+    assert p.env_overrides["CMUX_CLAUDE_PID"] == "99"
+    assert "99" not in json.dumps(p.mcp_doc)
     assert "--strict-mcp-config" in p.argv  # isolation is kept
     assert p.env_overrides["CMUX_COMPUTER_USE_MCP_DISABLED"] == "1"
-    assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] and "CMUX_CUA_SOCKET_AUTH_TOKEN" not in str(p.mcp_doc)
+    assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] == CUA_TOKEN and CUA_TOKEN not in json.dumps(p.mcp_doc)
+    assert "CMUX_CUA_SOCKET_AUTH_TOKEN" not in p.mcp_doc["mcpServers"]["cmux-cua"]["env"]  # only the shim names it
 
 
 def test_cmux_token_from_an_unreadable_file_falls_back_with_a_warning(catalog, fake_home, monkeypatch):
@@ -142,3 +146,39 @@ def test_cmux_token_from_an_unreadable_file_falls_back_with_a_warning(catalog, f
     p = plan_for(catalog, cmux=True)
     assert p.env_overrides["CMUX_CUA_SOCKET_AUTH_TOKEN"] == "inherited"
     assert any("may be stale" in w for w in p.warnings)
+
+
+def test_default_session_dir_is_content_addressed(catalog, fake_home):
+    from claude_launcher import sessions
+
+    p = build_plan(catalog, Selection(local=["gdrive"]), claude_bin="claude", owner_pid=1)
+    d = fake_home.home / ".claude-launcher" / "sessions" / sessions.session_id(p.mcp_doc, p.settings_doc)
+    assert p.mcp_path == d / "mcp.json" and p.settings_path == d / "settings.json"
+    assert f"--mcp-config={d}/mcp.json" in p.argv and p.argv.count("--settings") == 1
+    assert not d.exists()  # building a plan (or a preview) writes nothing
+    again = build_plan(catalog, Selection(local=["gdrive"]), claude_bin="claude", owner_pid=2)
+    assert again.mcp_path == p.mcp_path
+    other = build_plan(catalog, Selection(local=["agentmemory"]), claude_bin="claude")
+    assert other.mcp_path.parent != d
+
+
+@pytest.mark.parametrize("kw", [
+    {"cmux": True}, {"cmux": True, "connectors": ["claude.ai Slack"]},
+    {"local": ["agentmemory", "gdrive"], "plugins": ["dbtools@x"], "cmux": True},
+])
+def test_documents_are_identical_across_launches(catalog, fake_home, monkeypatch, kw):
+    """Same selection -> same bytes, whatever cm's PID, the cmux surface or the inherited PID."""
+    from claude_launcher import sessions
+
+    first = build_plan(catalog, Selection(**kw), claude_bin="claude", owner_pid=987651)
+    monkeypatch.setenv("CMUX_CLAUDE_PID", "987653")
+    monkeypatch.setenv("CMUX_SURFACE_ID", "SURFACE-OTHER")
+    monkeypatch.setenv("CMUX_CUA_SOCKET_PATH", str(fake_home.tmp / "other.sock"))
+    second = build_plan(catalog, Selection(**kw), claude_bin="claude", owner_pid=987652)
+    for a, b in ((first.mcp_doc, second.mcp_doc), (first.settings_doc, second.settings_doc)):
+        assert sessions.doc_bytes(a) == sessions.doc_bytes(b)
+    assert first.mcp_path == second.mcp_path
+    blob = json.dumps(first.mcp_doc) + json.dumps(first.settings_doc)
+    for per_launch in ("987651", "987652", "987653", "SURFACE-1", "SURFACE-OTHER", "cm-session-"):
+        assert per_launch not in blob
+    assert second.env_overrides["CMUX_CLAUDE_PID"] == "987652"

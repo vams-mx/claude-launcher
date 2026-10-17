@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 from rich.text import Text
 
 from . import costs as costs_mod
+from . import sessions as sessions_mod
 from .catalog import Catalog
+from .paths import tilde
 from .plan import LaunchPlan, Selection, build_plan
 from .redact import MASK, redact_mcp_doc, redact_settings, shell_join
 
-PREVIEW_DIR = Path(tempfile.gettempdir()) / "cm-session-XXXXXXXX"
-
 
 def preview_plan(cat: Catalog, sel: Selection, claude_bin: str) -> LaunchPlan:
-    return build_plan(cat, sel, claude_bin=claude_bin, session_dir=PREVIEW_DIR)
+    """The exact plan a launch would use, including its real session file paths
+    (content-addressed, so they are known before anything is written)."""
+    return build_plan(cat, sel, claude_bin=claude_bin)
+
+
+def session_note(plan: LaunchPlan) -> str:
+    d = plan.mcp_path.parent
+    state = "reused" if (d / "mcp.json").is_file() and (d / "settings.json").is_file() else "new"
+    if not sessions_mod.is_session_name(d.name):  # a throwaway dir (measurement probes, smoke script)
+        return f"{tilde(d)}/ (temporary)"
+    return f"{tilde(d)}/ ({state}; kept after exit for cmux restore; each start or resume marks it used)"
 
 
 def env_line(plan: LaunchPlan) -> str:
@@ -52,6 +59,8 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
         "deny-list (connectors selected; everything else blocked by name)"
     t.append("Isolation: ", style="bold")
     t.append(mode + "\n", style=c["ok"] if plan.mode == "strict" else c["warn"])
+    t.append("Session files: ", style="bold")
+    t.append(session_note(plan) + "\n", style="dim")
 
     servers = list(plan.mcp_doc["mcpServers"]) + [c for c in sel.connectors]
     t.append("Loads: ", style="bold")
@@ -59,7 +68,7 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
     enabled = [p for p, on in plan.settings_doc.get("enabledPlugins", {}).items() if on]
     t.append("Plugins: ", style="bold")
     t.append((", ".join(enabled) if enabled else "none (all disabled for this session)") + "\n")
-    hooks = plan.settings_doc.get("hooks") or {}
+    hooks = sessions_mod.without_touch_hook(plan.settings_doc).get("hooks") or {}  # cm's own hook isn't news
     if hooks:
         t.append("Hooks added: ", style="bold")
         names = list(hooks)
@@ -88,9 +97,10 @@ def plain(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs
 
     out = render(cat, sel, plan, costs).plain
     if show_files:
-        out += "\nmcp.json (0600):\n" + json.dumps(redact_mcp_doc(plan.mcp_doc), indent=2, ensure_ascii=False)
+        out += f"\n{tilde(plan.mcp_path)} (0600):\n" + json.dumps(redact_mcp_doc(plan.mcp_doc), indent=2,
+                                                                 ensure_ascii=False)
         s = redact_settings(plan.settings_doc)
         if "hooks" in s:
             s["hooks"] = {ev: f"{len(g)} hook group(s)" for ev, g in s["hooks"].items()}
-        out += "\nsettings.json (0600):\n" + json.dumps(s, indent=2, ensure_ascii=False) + "\n"
+        out += f"\n{tilde(plan.settings_path)} (0600):\n" + json.dumps(s, indent=2, ensure_ascii=False) + "\n"
     return out

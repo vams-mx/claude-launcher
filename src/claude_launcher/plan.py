@@ -23,6 +23,11 @@ In both modes a single `--settings <session settings.json>` carries
 selected servers' companion settings (e.g. AgentMemory), and the deny list.
 Only one --settings flag is ever passed: Claude Code reads only one when
 given several, and cmux's wrapper deep-merges exactly one into its own hooks.
+
+Both files go into a content-addressed directory (sessions.py) that is kept
+after Claude exits, so the documents must not depend on the launch: no PIDs,
+timestamps or temporary paths. Launch-specific values reach Claude through its
+environment instead (env_overrides).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cmux as cmux_mod
+from . import sessions as sessions_mod
 from .catalog import Catalog
 
 MODELS = ("default", "sonnet", "opus", "haiku")
@@ -108,10 +114,14 @@ def build_plan(
     sel: Selection,
     *,
     claude_bin: str,
-    session_dir: Path,
+    session_dir: Path | None = None,
     env: dict[str, str] | None = None,
     owner_pid: int | None = None,
 ) -> LaunchPlan:
+    """session_dir None (normal launches and the preview): the persistent,
+    content-addressed directory for the resulting documents (nothing is
+    created here; launcher.launch writes it). Measurement probes and the smoke
+    script pass a throwaway temporary directory instead."""
     env = dict(os.environ) if env is None else env
     owner_pid = os.getpid() if owner_pid is None else owner_pid
     warnings: list[str] = []
@@ -144,13 +154,16 @@ def build_plan(
     secret_env: set[str] = set()
     env_unset: list[str] = []
     if sel.cmux:
-        # The cmux-cua entry's owner PID is "${CMUX_CLAUDE_PID:-<cm pid>}". cmux's wrapper exports a
-        # fresh CMUX_CLAUDE_PID (Claude's own PID); an inherited one (e.g. from an outer Claude
-        # session) must not leak through when claude is started some other way.
-        env_unset.append("CMUX_CLAUDE_PID")
+        # The cmux-cua entry's owner PID is the reference "${CMUX_CLAUDE_PID:-}" (the file is reused,
+        # so no PID may be written into it). cmux's wrapper exports a fresh CMUX_CLAUDE_PID (Claude's
+        # own PID); when claude is started directly, cm's PID (Claude's parent) is the owner. An
+        # inherited value (e.g. from an outer Claude session) never leaks through.
         if not cat.cmux.available:
             raise PlanError(f"cmux computer-use unavailable: {cat.cmux.reason}")
-        servers[cmux_mod.SERVER_NAME] = cmux_mod.server_config(cat.cmux, env, owner_pid)
+        servers[cmux_mod.SERVER_NAME] = cmux_mod.server_config(cat.cmux, env)
+        env_overrides["CMUX_CLAUDE_PID"] = str(owner_pid)
+        if cmux_mod.needs_session_var(env):  # no surface id: a per-launch cursor session via the environment
+            env_overrides[cmux_mod.SESSION_VAR] = str(owner_pid)
         token, src = cmux_mod.resolve_token(env)
         if token:
             # cmux-cua 0.7.1's proxy reads only this variable (not the token file)
@@ -194,6 +207,11 @@ def build_plan(
         warnings.append("deny-list mode (deniedMcpServers): run `cm --refresh` after adding connectors in claude.ai")
 
     mcp_doc = {"mcpServers": servers}
+    if session_dir is None:  # persistent, content-addressed (sessions.py)
+        session_dir = sessions_mod.session_path(mcp_doc, settings)  # both documents are final here
+        # + the SessionStart hook that marks the directory as used (also on --resume / cmux restore);
+        # it names the directory, so it is not part of the id
+        settings = sessions_mod.with_touch_hook(settings, session_dir)
     mcp_path = session_dir / "mcp.json"
     settings_path = session_dir / "settings.json"
 

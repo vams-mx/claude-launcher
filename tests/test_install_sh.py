@@ -107,6 +107,27 @@ def test_rerun_upgrades_and_keeps_user_config(sandbox):
     assert "AgentMemory" not in p.stdout  # gate 0: silent
 
 
+def test_rerun_never_touches_profiles_sessions_or_caches(sandbox):
+    assert sandbox()[0].returncode == 0
+    home = sandbox.home / ".claude-launcher"
+    (home / "profiles").mkdir()
+    (home / "profiles" / "work.json").write_text('{"local": ["github"]}')
+    sess = home / "sessions" / ("ab" * 16)
+    sess.mkdir(parents=True, mode=0o700)
+    (sess / "mcp.json").write_text('{"mcpServers": {}}')
+    (sess / "settings.json").write_text("{}")
+    os.utime(sess, (1_000_000, 1_000_000))
+    (home / "connectors.json").write_text('{"connectors": []}')
+    (home / "costs.json").write_text('{"items": {}}')
+    (home / "config.json").write_text('{"theme": "cm-paper", "session_retention_days": 30}')
+    before = {q: (q.read_bytes() if q.is_file() else None, q.stat().st_mtime) for q in home.rglob("*")}
+    p, log = sandbox()
+    assert p.returncode == 0, p.stderr
+    assert log.count("uv tool install --force") == 2
+    after = {q: (q.read_bytes() if q.is_file() else None, q.stat().st_mtime) for q in home.rglob("*")}
+    assert after == before  # same files, same bytes, same times (a session's "last used" too)
+
+
 def test_piped_mode_installs_from_github(sandbox):
     p, log = sandbox(stdin_script=True)
     assert p.returncode == 0, p.stderr

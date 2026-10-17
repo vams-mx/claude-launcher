@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/vams-mx/claude-launcher/main/install.sh | sh
 #   sh install.sh                      # from a checkout: installs that checkout
 #
-# Safe to re-run: it upgrades cm and never overwrites your configuration.
+# Safe to re-run: it upgrades cm and never touches your data in ~/.claude-launcher
+# (config.json, profiles/, mcps/, caches, sessions/). New machine: README "Reinstall / new machine".
 #
 # Environment (all optional):
 #   CM_REPO=vams-mx/claude-launcher GitHub repo to install from (curl mode; a fork works too)

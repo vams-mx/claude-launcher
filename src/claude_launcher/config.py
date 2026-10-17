@@ -10,6 +10,11 @@ Keys (all optional; keys starting with `_` are documentation and ignored):
   theme                 screen colours (a cm-* theme or any Textual theme)
   INSTALL_AGENT_MEMORY  "0" / "1" / absent: the AgentMemory setup gate
                         (the environment variable of the same name wins)
+  session_retention_days  days a session directory (sessions/<id>/) is kept
+                        after its last use (a launch through cm, or a start or
+                        resume of that session, e.g. a cmux restore); default
+                        60, 0 = forever. Starts/resumes count only while hooks
+                        run (not with disableAllHooks or managed-only hooks).
 
 Also: the one-time migration from the pre-0.2 home (~/.config/claude-launcher).
 """
@@ -42,6 +47,11 @@ COMMENT = [
     "theme: colours of the interactive screen: cm-graphite (default), cm-slate, cm-moss, cm-ink, cm-paper, cm-sand, cm-mist, or any Textual theme. Ctrl+T cycles.",
     "INSTALL_AGENT_MEMORY: absent = ask once, \"0\" = never ask, \"1\" = run `cm setup agentmemory`.",
     "  The environment variable INSTALL_AGENT_MEMORY overrides this value.",
+    ("session_retention_days: session files (sessions/<id>/, kept so cmux can restore sessions) are deleted on a "
+     "later launch once nothing has used them for this many days. Use = a launch through cm, or any start or resume "
+     "of a session with them (a cmux restore too). Default 60; 0 keeps them forever."),
+    ("  Starts and resumes are noticed by a SessionStart hook: with hooks disabled (disableAllHooks, or "
+     "managed-only hooks) only launches through cm count, so use 0 there."),
     f"Docs: {DOCS_URL}",
 ]
 

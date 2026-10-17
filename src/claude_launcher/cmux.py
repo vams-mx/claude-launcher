@@ -26,6 +26,21 @@ from pathlib import Path
 from .paths import home
 
 SERVER_NAME = "cmux-cua"
+SESSION_VAR = "CM_CUA_SESSION"  # cm's per-launch cursor-session fallback when CMUX_SURFACE_ID is unset
+# Runs the client with the socket token in its environment, read when the server starts, so a
+# cmux restore (which replays argv but not cm's environment, and under --strict-mcp-config gets no
+# token from the wrapper either) still authenticates. Same order as resolve_token and cmux's wrapper:
+# the token FILE wins, read fresh every time the server starts (so a reconnect via /mcp after the
+# daemon rewrote the file picks up the new token, never a stale exported one); an inherited
+# CMUX_CUA_SOCKET_AUTH_TOKEN is only the fallback when the file is missing or empty. Like
+# `$(cat …)` trailing newlines go; `tr -d '\r'` also drops CR (cm strips \r\n). No secret is ever
+# written; "$0" is the client, "$@" its arguments, both separate argv elements (never interpolated
+# into the script). The script contains no "${": Claude Code only expands braced references, so it
+# reaches /bin/sh verbatim (verified on 2.1.281, see README).
+TOKEN_SHIM = ('t=; [ -f "$CMUX_CUA_AUTH_TOKEN_FILE" ] && t=$(cat "$CMUX_CUA_AUTH_TOKEN_FILE" | tr -d \'\\r\'); '
+              '[ -n "$t" ] && { CMUX_CUA_SOCKET_AUTH_TOKEN=$t; export CMUX_CUA_SOCKET_AUTH_TOKEN; }; '
+              'exec "$0" "$@"')
+SHELL = "/bin/sh"
 DEFAULT_APP_BIN = Path("/Applications/cmux.app/Contents/Resources/bin")
 
 _TEMPLATE_RE = re.compile(
@@ -93,23 +108,47 @@ def _scope(env: dict[str, str]) -> str:
     return s or "default"
 
 
-def _values(env: dict[str, str], client: Path, owner_pid: int) -> dict[str, str]:
+def _values(env: dict[str, str], client: Path) -> dict[str, str]:
+    """The wrapper's template values, as written into cm's session mcp.json.
+
+    The file is kept and reused across launches (and replayed by a cmux
+    restore), so nothing launch-specific may be baked into it. Values the
+    wrapper takes from the environment are therefore written as `${VAR:-default}`
+    references, which Claude Code expands at launch from its own environment,
+    exactly when the wrapper would compute them: the defaults are the wrapper's
+    own fallbacks, computed here.
+
+    The owner PID: the wrapper uses the PID of the process that *becomes* Claude
+    (it exports CMUX_CLAUDE_PID=$$ and then execs claude); cmux's app ties
+    approvals to it. cm can't know Claude's PID before spawning it, so the file
+    says `${CMUX_CLAUDE_PID:-}` and cm exports CMUX_CLAUDE_PID=<cm's PID> to
+    Claude (plan.build_plan): through the wrapper that is replaced by Claude's
+    own PID, and when claude is started directly, cm (Claude's parent, alive
+    exactly as long as Claude) is the owner. If nobody sets it (claude replayed
+    outside both cm and the wrapper, where computer use can't work anyway) the
+    value is empty rather than a stale PID.
+
+    The cursor session: the wrapper uses `cmux-${CMUX_SURFACE_ID:-$$}`. `${}`
+    doesn't nest, so this is decided here: with a surface id, the file says
+    `cmux-${CMUX_SURFACE_ID:-cm}`; without one, `cmux-${CM_CUA_SESSION:-cm}` and
+    cm exports CM_CUA_SESSION=<cm's PID> (see `needs_session_var`), so two such
+    sessions never share one cursor session while the file stays stable."""
     scope = _scope(env)
     uid = os.getuid()
-    # The wrapper uses the PID of the process that *becomes* Claude (it exports
-    # CMUX_CLAUDE_PID=$$ and then execs claude); cmux's app ties approvals to it.
-    # cm can't know Claude's PID before spawning it, so it writes a reference that
-    # Claude Code expands at launch from its own environment (falling back to
-    # cm's PID when claude isn't started through cmux's wrapper).
-    claude_pid = "${CMUX_CLAUDE_PID:-%d}" % owner_pid
+    socket_default = f"/tmp/cmux-cua-{uid}/{scope}/cmux-cua.sock"
+    state_default = str(home() / "Library/Application Support/cmux/cmux-cua/runtime" / scope / "state")
     return {
         "client": str(client),
-        "cua_socket": env.get("CMUX_CUA_SOCKET_PATH") or f"/tmp/cmux-cua-{uid}/{scope}/cmux-cua.sock",
-        "default_session": f"cmux-{env.get('CMUX_SURFACE_ID') or claude_pid}",
-        "CMUX_CLAUDE_PID": claude_pid,
-        "state_dir": env.get("CMUX_CUA_STATE_DIR")
-        or str(home() / "Library/Application Support/cmux/cmux-cua/runtime" / scope / "state"),
+        "cua_socket": f"${{CMUX_CUA_SOCKET_PATH:-{socket_default}}}",
+        "default_session": "cmux-${%s:-cm}" % ("CMUX_SURFACE_ID" if env.get("CMUX_SURFACE_ID") else SESSION_VAR),
+        "CMUX_CLAUDE_PID": "${CMUX_CLAUDE_PID:-}",
+        "state_dir": f"${{CMUX_CUA_STATE_DIR:-{state_default}}}",
     }
+
+
+def needs_session_var(env: dict[str, str]) -> bool:
+    """True when the entry refers to CM_CUA_SESSION, which cm must then export."""
+    return not env.get("CMUX_SURFACE_ID")
 
 
 def probe(env: dict[str, str]) -> CmuxStatus:
@@ -135,12 +174,18 @@ def probe(env: dict[str, str]) -> CmuxStatus:
         st.reason = "could not find the cmux-cua MCP template in the wrapper (cmux changed?)"
         return st
     st.template, st.arg_names = parsed
-    unknown = [a for a in st.arg_names if _arg_key(a) not in _values(env, client, 0)]
+    unknown = [a for a in st.arg_names if _arg_key(a) not in _values(env, client)]
     if unknown:
         st.reason = f"wrapper template uses unknown values {unknown}"
         return st
     _, st.token_source = resolve_token(env)
     st.available = True
+    try:
+        server_config(st, env)  # the entry must be buildable from this template, or cmux is unavailable
+    except (ValueError, KeyError, TypeError) as exc:
+        st.available = False
+        st.reason = f"cannot build the cmux-cua entry from the wrapper template (cmux changed?): {exc}"
+        return st
     if not st.in_cmux:
         st.reason = "not running inside a cmux terminal; computer-use calls will fail"
     elif not st.token_source:
@@ -148,18 +193,30 @@ def probe(env: dict[str, str]) -> CmuxStatus:
     return st
 
 
-def server_config(status: CmuxStatus, env: dict[str, str], owner_pid: int) -> dict:
-    """Fill the wrapper's template -> the `cmux-cua` server entry (no secrets)."""
+def server_config(status: CmuxStatus, env: dict[str, str]) -> dict:
+    """Fill the wrapper's template -> the `cmux-cua` server entry (no secrets, nothing launch-specific)."""
     if not (status.available and status.template and status.client):
         raise ValueError(status.reason or "cmux computer-use unavailable")
-    vals = _values(env, status.client, owner_pid)
+    vals = _values(env, status.client)
     parts = status.template.split("%s")
     out = [parts[0]]
     for expr, tail in zip(status.arg_names, parts[1:]):
         out.append(json.dumps(vals[_arg_key(expr)])[1:-1])  # JSON-escape like the wrapper
         out.append(tail)
     doc = json.loads("".join(out))
-    return doc["mcpServers"][SERVER_NAME]
+    entry = doc["mcpServers"][SERVER_NAME]
+    return wrap_with_token_shim(entry)
+
+
+def wrap_with_token_shim(entry: dict) -> dict:
+    """{"command": C, "args": A} -> {"command": "/bin/sh", "args": ["-c", TOKEN_SHIM, C, *A]}."""
+    assert "${" not in TOKEN_SHIM
+    if not isinstance(entry.get("command"), str) or not isinstance(entry.get("args", []), list):
+        raise TypeError("unexpected cmux-cua entry shape (cmux changed?)")
+    out = dict(entry)
+    out["command"] = SHELL
+    out["args"] = ["-c", TOKEN_SHIM, entry["command"], *entry.get("args", [])]
+    return out
 
 
 _TOKEN_MAX = 4096  # far above a real token (64 chars); bounds the read

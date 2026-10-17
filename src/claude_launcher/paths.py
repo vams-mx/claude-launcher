@@ -38,9 +38,10 @@ def tilde(p: Path) -> str:
 def config_dir() -> Path:
     """cm's home: config.json, profiles, mcps/, connector cache, measured costs.
 
-    ~/.claude-launcher, or $CM_CONFIG_DIR when set."""
+    ~/.claude-launcher, or $CM_CONFIG_DIR when set. Always absolute: session file paths derived
+    from it go into Claude's argv and hooks, which must work from any directory (and on restore)."""
     if os.environ.get("CM_CONFIG_DIR"):
-        return expand(os.environ["CM_CONFIG_DIR"])
+        return Path(os.path.abspath(expand(os.environ["CM_CONFIG_DIR"])))
     return home() / ".claude-launcher"
 
 

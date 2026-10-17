@@ -17,7 +17,7 @@ def bare_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     for var in list(os.environ):
-        if var.startswith(("CM_", "XDG_CONFIG_HOME", "INSTALL_AGENT_MEMORY", "CLAUDE")):
+        if var.startswith(("CM_", "CMUX_", "XDG_CONFIG_HOME", "INSTALL_AGENT_MEMORY", "CLAUDE")):
             monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CM_MANAGED_DIR", str(tmp_path / "managed"))

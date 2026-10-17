@@ -23,7 +23,7 @@ from pathlib import Path
 from . import __version__, compat
 from . import config as cfg_mod
 from . import costs as costs_mod
-from . import profiles
+from . import profiles, sessions
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
 from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
@@ -253,6 +253,10 @@ def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | Non
         "config_dir_from": "CM_CONFIG_DIR" if os.environ.get("CM_CONFIG_DIR") else "default",
         "config_file": tilde(config_file()), "config_file_exists": config_file().is_file(),
         "legacy_config_dir": tilde(legacy) if legacy.is_dir() else None,
+        "sessions_dir": tilde(sessions.sessions_dir()), "sessions": sessions.count(),
+        "sessions_dir_from": "CM_SESSIONS_DIR" if os.environ.get("CM_SESSIONS_DIR") else "default",
+        "sessions_synced_folder": sessions.synced_folder(),
+        "session_retention_days": sessions.retention_days(cfg_mod.load_config()),
         "managed_dir": str(managed_dir()),
         "claude": {"bin": claude_bin, "version": version, "verified_on": list(compat.VERIFIED_VERSIONS),
                    "warning": compat.version_warning(version)},
@@ -265,6 +269,13 @@ def print_where(cat: Catalog, as_json: bool, claude_bin: str, version: str | Non
     print(f"config file   {doc['config_file']}" + ("" if doc["config_file_exists"] else "  (not created yet: cm setup init)"))
     if doc["legacy_config_dir"]:
         print(f"old home      {doc['legacy_config_dir']}  (no longer read; safe to delete once you're happy)")
+    keep = doc["session_retention_days"]
+    print(f"sessions      {doc['sessions_dir']}  ({doc['sessions']} kept; "
+          + (f"removed after {keep:g} days unused" if keep else "kept forever (session_retention_days: 0)")
+          + "; per machine, don't copy)" + ("  (from CM_SESSIONS_DIR)" if doc["sessions_dir_from"] != "default" else ""))
+    if doc["sessions_synced_folder"]:
+        print(f"              • inside a synced folder ({doc['sessions_synced_folder']}): session files are per machine, "
+              "and one machine's cleanup can delete another's. Set CM_SESSIONS_DIR to a local directory.")
     print(f"managed dir   {doc['managed_dir']}")
     print(f"claude        {claude_bin} ({version or 'version unknown'}; control matrix verified on "
           f"{', '.join(compat.VERIFIED_VERSIONS)})")
@@ -440,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             from .redact import redact_mcp_doc, redact_settings
 
             print(json.dumps({"argv": plan.argv, "env": env_line(plan), "mode": plan.mode,
+                              "session_dir": str(plan.mcp_path.parent),
                               "mcp": redact_mcp_doc(plan.mcp_doc), "settings": redact_settings(plan.settings_doc),
                               "denied": plan.denied, "warnings": plan.warnings}, indent=2))
         else:
