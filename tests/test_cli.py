@@ -297,3 +297,106 @@ def test_sessions_rejects_a_negative_count(fake_home, capsys):
     assert run("--sessions", "-5") == 2
     assert "--sessions N must be 0 or more" in capsys.readouterr().err
     assert run("--sessions") == 0  # no N: the config default
+
+
+# --- --worktree / --tmux ----------------------------------------------------------
+
+
+def test_worktree_flag_headless_names(fake_home, launched, capsys):
+    assert run("--mcp", "none", "--name", "X (fork)", "--worktree") == 0
+    assert (launched[-1].worktree, launched[-1].tmux) == ("x-fork", False)
+    assert run("--mcp", "none", "--worktree") == 0  # no name: cm-<date>-<id>, never a prompt
+    assert launched[-1].worktree.startswith("cm-") and launched[-1].name is None
+    assert run("--mcp", "none", "--worktree", "feature/login", "--tmux") == 0
+    assert (launched[-1].worktree, launched[-1].tmux) == ("feature/login", True)
+    assert run("--mcp", "none") == 0 and launched[-1].worktree is None
+
+
+@pytest.mark.parametrize("args,err", [
+    (["--tmux"], "--tmux needs --worktree"),
+    (["--worktree", "bad name"], "invalid worktree name"),
+    (["--worktree", "x", "--", "-w", "y"], "given twice"),
+    (["--worktree", "--", "--worktree"], "given twice"),
+    (["--worktree", "x", "--", "--tmux"], "given twice"),
+    (["--tmux", "--worktree", "x", "--", "-wy"], "given twice"),
+    (["--continue", "--worktree", "x"], "Continue"),
+    (["--continue", "--fork", "--worktree"], "Continue"),
+    (["--resume", "abc-1", "--worktree", "x", "--tmux"], "needs Fork"),
+])
+def test_worktree_flag_validation(fake_home, launched, capsys, args, err):
+    assert run("--mcp", "none", *args) == 2
+    assert err in capsys.readouterr().err
+    assert not launched
+
+
+def test_worktree_outside_a_repository(fake_home, launched, capsys, tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert run("--cwd", str(plain), "--mcp", "none", "--worktree") == 2
+    assert "git repository" in capsys.readouterr().err
+
+
+def test_worktree_dry_run_shows_the_fork_argv_and_session_line(fake_home, launched, capsys):
+    from tests.conftest import SID, standard_sessions
+
+    standard_sessions(fake_home.project)
+    assert run("--dry-run", "--json", "--resume", SID[0], "--fork", "--name", "X v2", "--worktree") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["argv"][-7:] == ["--fork-session", "--name", "X v2", "-w", "x-v2", "--resume", SID[0]]
+    assert doc["argv"].count("--name") == 1
+    assert doc["session"] == 'fork of FORCE Kafka reconciliation → "X v2" in worktree x-v2'
+    assert run("--dry-run", "--mcp", "none", "--worktree", "w1", "--tmux") == 0
+    out = capsys.readouterr().out
+    assert "in worktree w1 (tmux)" in out and "Worktree: " in out and "branch worktree-w1  (new)" in out
+    assert not launched
+
+
+def test_existing_worktree_headless_warns_or_refuses(fake_home, launched, capsys):
+    from tests.test_worktree import add_worktree
+
+    main = fake_home.project
+    add_worktree(main, main / ".claude" / "worktrees" / "kept", branch="worktree-kept")
+    assert run("--mcp", "none", "--worktree", "kept") == 0  # reuse: launched, never asks, but says so
+    assert "worktree kept: exists: claude reuses it" in capsys.readouterr().err
+    ref = main / ".git" / "refs" / "heads" / "worktree-left"
+    ref.write_text("0" * 40)
+    n = len(launched)
+    assert run("--mcp", "none", "--worktree", "left") == 2  # would reset a leftover branch: refused headless
+    err = capsys.readouterr().err
+    assert "git worktree add -B" in err and "Not launched" in err and len(launched) == n
+    assert run("--dry-run", "--mcp", "none", "--worktree", "left") == 0  # the preview just warns
+    assert "git worktree add -B" in capsys.readouterr().out
+
+
+def test_resume_of_a_worktree_session_runs_there(fake_home, fake_popen, monkeypatch, capsys):
+    from claude_launcher import launcher
+    from tests.conftest import SID, rec_assistant, rec_user, write_session
+    from tests.test_worktree import add_worktree
+
+    main = fake_home.project
+    a = add_worktree(main, main / ".claude" / "worktrees" / "feat-a")
+    write_session(a, SID[1], [rec_user("w", 1), rec_assistant(1)])
+    popen = fake_popen()
+    real = launcher.launch
+    monkeypatch.setattr(cli, "launch", lambda cat, sel, **kw: real(cat, sel, popen=popen, **kw))
+    assert run("--mcp", "none", "--resume", SID[1]) == 0
+    assert popen.calls[-1].kw["cwd"] == a and popen.calls[-1].argv[-2:] == ["--resume", SID[1]]
+    assert run("--sessions") == 0
+    assert "⎇ feat-a" in capsys.readouterr().out
+
+
+def test_worktree_alone_opens_the_screen_with_it_ticked(fake_home, monkeypatch, launched):
+    import claude_launcher.tui as tui
+
+    seen = {}
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    def fake_tui(cat, sel, **kw):
+        seen["sel"] = Selection.from_dict(sel.to_dict())
+        return sel
+
+    monkeypatch.setattr(tui, "run_tui", fake_tui)
+    assert run("--worktree") == 0  # like --name: not a selection flag
+    assert seen["sel"].worktree == ""  # the screen derives the name
+    assert launched[-1].worktree.startswith("cm-")

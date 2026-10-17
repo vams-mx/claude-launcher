@@ -8,6 +8,7 @@
   cm --cmux / --no-mcp / --list / --where / --continue / --resume [id]
   cm --forget-last                forget the screen's last selection for this project
   cm --resume <id> --fork --name "new name"    resume (or fork) a session, naming it
+  cm --resume <id> --fork --name "X v2" --worktree [--tmux]   fork it into its own git worktree (claude -w x-v2)
   cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
   cm ... -- <args forwarded verbatim to claude>
   cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
@@ -27,14 +28,16 @@ from . import __version__, compat
 from . import config as cfg_mod
 from . import costs as costs_mod
 from . import profiles, recent, remember, sessions
+from . import worktree as wt_mod
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
 from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
-from .plan import MODELS, PlanError, Selection, can_fork, passthrough_name
+from .plan import MODELS, PlanError, Selection, can_fork, passthrough_name, passthrough_worktree
 from .preview import plain, preview_plan
 from .redact import redact_server
 
 _RESUME_PICKER = "\0picker"
+_WORKTREE_DEFAULT = "\0default"
 _SESSIONS_DEFAULT = object()  # `--sessions` given without N: use recent_sessions from config.json
 
 
@@ -76,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="with --resume <id> or --continue: fork into a new session id (--fork-session)")
     sel.add_argument("--name", metavar="NAME",
                      help="session display name, passed as claude's --name (long form only: -n is --dry-run)")
+    sel.add_argument("--worktree", nargs="?", const=_WORKTREE_DEFAULT, metavar="NAME",
+                     help="start in a new git worktree (claude -w). NAME defaults to the session name as a "
+                          "slug (--name \"X (fork)\" -> x-fork), else cm-<date>-<id>")
+    sel.add_argument("--tmux", action="store_true", help="with --worktree: also open a tmux session (claude --tmux)")
     sel.add_argument("-i", "--interactive", action="store_true", help="open the screen even with flags given")
 
     info = p.add_argument_group("catalog, profiles and costs")
@@ -188,9 +195,45 @@ def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str
         sel.resume_id = None if a.resume == _RESUME_PICKER else a.resume
     sel.fork = bool(a.fork)
     sel.name = a.name.strip() if a.name is not None else None
+    # "" = on, name still to be chosen (the screen derives it from Name; headless: _finish_worktree)
+    sel.worktree = None if a.worktree is None else ("" if a.worktree == _WORKTREE_DEFAULT else a.worktree.strip())
+    sel.tmux = bool(a.tmux)
     if passthrough:
         sel.extra_args = passthrough
     return sel, notes
+
+
+def finish_session(cwd: Path, sel: Selection, *, headless: bool = False) -> list[str]:
+    """The last per-launch decisions, the same for the screen's result and headless launches:
+
+    * a resumed session of another checkout of the repository (a git worktree) is resumed from
+      that checkout;
+    * `--worktree` without a name gets the default: the session name as a slug, else
+      cm-<date>-<id>.
+
+    Returns warnings about an existing worktree of that name. Headless launches never ask, so
+    one where claude would replace something (reset a leftover branch, recreate a broken
+    worktree) is refused instead (PlanError); the screen has already asked for a second Enter."""
+    notes: list[str] = []
+    if sel.session == "resume" and sel.resume_id and not sel.launch_dir:
+        found = recent.find(cwd, sel.resume_id)
+        if found and found.cwd:
+            sel.launch_dir = found.cwd
+    if sel.worktree is None:
+        return notes
+    if sel.worktree == "":
+        sel.worktree = wt_mod.default_name(sel.name, wt_mod.generated_name())
+    if why := wt_mod.unsupported(sel, wt_mod.find_repo(cwd)):
+        raise PlanError(why)
+    repo = wt_mod.find_repo(cwd)
+    if repo is not None and not wt_mod.valid_name(sel.worktree):
+        st = wt_mod.inspect(repo, sel.worktree)
+        if st.kind == wt_mod.REPLACE and headless:
+            raise PlanError(f"worktree {sel.worktree}: {st.message}. Not launched: choose another --worktree "
+                            "name, or confirm it on the screen (cm -i …)")
+        if st.kind in (wt_mod.REUSE, wt_mod.REPLACE):
+            notes.append(f"worktree {sel.worktree}: {st.message}")
+    return notes
 
 
 def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> None:
@@ -266,7 +309,8 @@ def print_sessions(cwd: Path, limit: int, as_json: bool) -> int:
     ages = [s.age() for s in res.sessions]
     w = max(len(x) for x in ages)
     for s, ag in zip(res.sessions, ages, strict=True):
-        print(f"{s.id}  {ag:<{w}}  {s.name}{marks.get(s.source, '')}")
+        wt = f"  {s.mark} ({tilde(Path(s.cwd))})" if s.worktree and s.cwd else ""
+        print(f"{s.id}  {ag:<{w}}  {s.name}{marks.get(s.source, '')}{wt}")
     return 0
 
 
@@ -474,6 +518,15 @@ def main(argv: list[str] | None = None) -> int:
     if a.name is not None and passthrough_name(passthrough):
         _err("the session is named twice (--name and a --name/-n after --); keep only one")
         return 2
+    if a.tmux and a.worktree is None:
+        _err("--tmux needs --worktree (claude's --tmux only works with -w)")
+        return 2
+    if (a.worktree is not None or a.tmux) and passthrough_worktree(passthrough):
+        _err("the worktree is given twice (--worktree/--tmux and a -w/--worktree/--tmux after --); keep only one")
+        return 2
+    if a.worktree not in (None, _WORKTREE_DEFAULT) and (bad := wt_mod.valid_name(a.worktree.strip())):
+        _err(bad)
+        return 2
 
     if a.refresh:
         try:
@@ -556,10 +609,17 @@ def main(argv: list[str] | None = None) -> int:
             _err(f"profile: {n}")
 
     try:
+        wt_notes = finish_session(cat.cwd, sel, headless=not screen and not a.dry_run)
+    except PlanError as exc:
+        _err(str(exc))
+        return 2
+
+    try:
         plan = preview_plan(cat, sel, claude_bin)
     except PlanError as exc:
         _err(str(exc))
         return 2
+    plan.warnings += wt_notes
 
     if a.save_profile:
         try:

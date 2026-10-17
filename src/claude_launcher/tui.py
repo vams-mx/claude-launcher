@@ -6,9 +6,13 @@ estimated context cost, warnings) at the bottom. Space toggles, Enter launches.
 
 The Session box: New / Continue / Resume… (claude's picker), a Recent selector
 (this project's last sessions, read off the UI thread by recent.py; picking one
-means "resume that id"), Fork (--fork-session) and Name (--name). Name is
-pre-filled for a resumed or forked session; launching a new session with an
-empty name asks once first.
+means "resume that id"; sessions of the repository's other git worktrees are
+marked "⎇ <worktree>" and resume from that directory), Fork (--fork-session),
+Name (--name) and Worktree (-w <name>, its name following Name until edited)
+with tmux (--tmux). Name is pre-filled for a resumed or forked session;
+launching a new session with an empty name asks once first, and a worktree
+name that already exists (claude may reset or replace it) asks once too.
+Combinations claude can't do are disabled, with the reason below them.
 
 Opened without selection flags, the screen starts from the selection last
 launched from it in this project (remember.py; cli.py decides) and says so in
@@ -33,15 +37,17 @@ from . import compat, health, profiles
 from . import config as config_mod
 from . import recent as recent_mod
 from . import themes
+from . import worktree as wt_mod
 from . import costs as costs_mod
 from .catalog import Catalog, Connector, discover_connectors, refresh_connectors
-from .plan import PlanError, Selection, can_fork, passthrough_name
+from .plan import PlanError, Selection, can_fork, passthrough_name, passthrough_worktree
 from .preview import preview_plan, render
 
 MODEL_LABELS = {"default": "Default", "sonnet": "Sonnet", "opus": "Opus", "haiku": "Haiku"}
 PERM_LABELS = {"standard": "Standard (ask before acting)", "skip": "⚠ Skip permissions (--dangerously-skip-permissions)"}
 SESSION_LABELS = {"new": "New session", "continue": "Continue last (--continue)", "resume": "Resume… (native picker)"}
 NAME_NUDGE = "Name this session (Enter again to launch without a name)"
+WT_CONFIRM = "Enter again to launch anyway"
 
 def _edge(options: list, last: bool) -> int | None:
     """Index of the first (or last) enabled option, or None if none is enabled."""
@@ -122,6 +128,10 @@ RadioSet:focus { border: round $accent; background: $boost; }
 #recent { margin-top: 0; }
 #fork { width: 100%; }
 #name_note { color: $warning; }
+#wt_row { height: auto; }
+#wt_row Input { width: 1fr; }
+#wt_note { color: $text-muted; }
+#wt_note.warn { color: $warning; }
 #prefill { padding: 0 1; }
 #profile_row { height: auto; }
 #profile_row Input { width: 1fr; }
@@ -167,6 +177,11 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.known: dict[str, recent_mod.RecentSession] = {}  # listed sessions (+ the initial --resume id)
         self._autoname = ""  # the Name value cm filled in last; anything else was typed and is kept
         self._name_asked = False  # the empty-name nudge was shown (next Enter launches unnamed)
+        self.repo = wt_mod.find_repo(cat.cwd)  # a few stats, no git process
+        self._wt_auto = ""  # the worktree name cm filled in last; anything else was typed and is kept
+        self._wt_fallback = wt_mod.generated_name()  # for an unnamed session, stable for this screen
+        self._wt_confirmed: str | None = None  # worktree name whose "exists" warning one Enter confirmed
+        self._wt_confirm_msg = ""
         self._disarm_timer: Timer | None = None
         for t in themes.CUSTOM:
             self.register_theme(t)
@@ -216,6 +231,13 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                 yield Checkbox("Fork (--fork-session)", value=self.sel.fork, id="fork")
                 yield Input(placeholder="Session name (--name)", id="name", value=self.sel.name or "")
                 yield Static("", classes="note", id="name_note")
+                with Horizontal(id="wt_row"):
+                    yield Checkbox("Worktree", value=self.sel.worktree is not None, id="worktree",
+                                   tooltip="-w: start in a git worktree .claude/worktrees/<name>")
+                    yield Input(placeholder="worktree name", id="worktree_name", value=self.sel.worktree or "")
+                    yield Checkbox("tmux", value=self.sel.tmux, id="tmux",
+                                   tooltip="--tmux: open the worktree session in tmux (needs Worktree)")
+                yield Static("", classes="note", id="wt_note")
                 yield Label("Profile", classes="group")
                 yield FlowSelect([(p, p) for p in profiles.list_profiles()], prompt="load profile…",
                              id="profile", allow_blank=True,
@@ -369,12 +391,25 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         )
         # a ticked Fork only counts while there is something to fork (it is greyed out otherwise)
         sel.fork = self.query_one("#fork", Checkbox).value and can_fork(sel)
+        if sel.session == "resume" and sel.resume_id and (s := self.known.get(sel.resume_id)) and s.cwd:
+            sel.launch_dir = s.cwd  # a session of another checkout resumes from there
+        # likewise Worktree and tmux only count while they are enabled
+        if self.query_one("#worktree", Checkbox).value and self._worktree_block(sel) is None:
+            sel.worktree = self.query_one("#worktree_name", Input).value.strip()
+            sel.tmux = self.query_one("#tmux", Checkbox).value and wt_mod.tmux_block(sel) is None
         return sel
+
+    def _worktree_block(self, sel: Selection) -> str | None:
+        """Why Worktree can't be used with this selection (shown under it), or None."""
+        if passthrough_worktree(sel.extra_args):
+            return "Worktree: already given by the arguments after --"
+        return wt_mod.worktree_block(sel, self.repo)
 
     def _update_preview(self) -> None:
         self.sel = self._read_selection()
         if self.sel.session != "resume":
             self.sel.resume_id = None
+        self._update_wt_note()
         pv = self.query_one("#preview", Static)
         try:
             plan = preview_plan(self.cat, self.sel, self.claude_bin)
@@ -385,7 +420,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             return
         self.plan_ok = True
         pv.remove_class("error")
-        pv.update(render(self.cat, self.sel, plan, self.costs, self._palette(), titles=self._titles()))
+        pv.update(render(self.cat, self.sel, plan, self.costs, self._palette(), titles=self._titles(),
+                         repo=self.repo))
 
     # ------------------------------------------------------------------ session box
     def _titles(self) -> dict[str, str]:
@@ -416,10 +452,57 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         if (not name.value.strip() or name.value == self._autoname) and name.value != suggestion:
             name.value = suggestion
         self._autoname = suggestion
+        self._sync_worktree(sel)
+
+    def _sync_worktree(self, sel: Selection) -> None:
+        """Worktree / its name / tmux: enabled only where claude supports them; the name follows
+        Name (as a slug) until it is edited by hand."""
+        block = self._worktree_block(sel)
+        box = self.query_one("#worktree", Checkbox)
+        box.disabled = block is not None
+        on = box.value and block is None
+        wt_name = self.query_one("#worktree_name", Input)
+        wt_name.disabled = not on
+        self.query_one("#tmux", Checkbox).disabled = not on or wt_mod.tmux_block(sel) is not None
+        suggestion = wt_mod.default_name(self.query_one("#name", Input).value, self._wt_fallback)
+        if (not wt_name.value.strip() or wt_name.value == self._wt_auto) and wt_name.value != suggestion:
+            wt_name.value = suggestion
+        self._wt_auto = suggestion
+
+    def _update_wt_note(self) -> None:
+        """Under the worktree controls: why they are disabled, else what claude will do with an
+        existing worktree of that name (and, once Enter was pressed, that a second Enter confirms)."""
+        note = self.query_one("#wt_note", Static)
+        sel = self.sel
+        block = self._worktree_block(sel)
+        lines: list[str] = []
+        warn = False
+        if block:
+            lines.append(block)
+        elif sel.worktree and sel.worktree == self._wt_confirmed and self._wt_confirm_msg:
+            lines.append(self._wt_confirm_msg)
+            warn = True
+        elif sel.worktree and not wt_mod.valid_name(sel.worktree):
+            try:
+                st = wt_mod.inspect(self.repo, sel.worktree) if self.repo else None
+            except Exception:  # noqa: BLE001 - only a hint
+                st = None
+            if st and st.exists:
+                lines.append(f"{sel.worktree}: {st.message}")
+                warn = True
+        if not block and self.query_one("#worktree", Checkbox).value:
+            if tb := wt_mod.tmux_block(sel):
+                lines.append(tb)
+        text = "\n".join(lines)
+        note.update(text)
+        note.set_class(warn, "warn")
+        note.display = bool(text)
 
     def _recent_row(self, s: recent_mod.RecentSession) -> Text:
         t = Text(recent_mod.shorten(s.name, 40), style="" if s.custom else "italic")
         t.append(f" · {s.age()}", style="dim")
+        if s.worktree:
+            t.append(f" · {s.mark}", style=self._palette()["warn"])
         return t
 
     @work(thread=True, exclusive=True, group="recent")
@@ -528,6 +611,18 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     def _name_changed(self, event: Input.Changed) -> None:
         if event.value.strip():
             self.query_one("#name_note", Static).display = False
+        self._sync_worktree(self._read_selection())
+        self._update_preview()
+
+    @on(Checkbox.Changed, "#worktree")
+    @on(Checkbox.Changed, "#tmux")
+    def _worktree_changed(self) -> None:
+        self._sync_worktree(self._read_selection())
+        self._update_preview()
+
+    @on(Input.Changed, "#worktree_name")
+    def _worktree_name_changed(self) -> None:
+        self._sync_worktree(self._read_selection())
         self._update_preview()
 
     @on(Select.Changed, "#profile")
@@ -653,6 +748,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             note.display = True
             self.query_one("#name", Input).focus()
             return
+        if self.sel.worktree and self.repo and self._wt_confirmed != self.sel.worktree:
+            st = wt_mod.inspect(self.repo, self.sel.worktree)
+            if st.needs_confirm:
+                # Ask once per name: the next Enter (now in the worktree name box) launches.
+                self._wt_confirmed = self.sel.worktree
+                self._wt_confirm_msg = f"{self.sel.worktree}: {st.message}. {WT_CONFIRM}, or change the name."
+                self._update_wt_note()
+                self.query_one("#worktree_name", Input).focus()
+                return
         self.exit(("launch", self.sel))
 
     def action_quit_app(self) -> None:

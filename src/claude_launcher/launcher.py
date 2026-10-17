@@ -127,6 +127,12 @@ def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = N
                 continue
 
 
+def launch_dir(cat: Catalog, sel: Selection) -> Path:
+    """Where claude starts: the catalog's directory, or the checkout a resumed worktree session
+    belongs to (claude looks a session up by its directory)."""
+    return Path(sel.launch_dir) if sel.launch_dir else cat.cwd
+
+
 def launch(
     cat: Catalog,
     sel: Selection,
@@ -145,6 +151,7 @@ def launch(
         with temp_session_dir() as tmp:
             plan = build_plan(cat, sel, claude_bin=claude_bin, session_dir=tmp)
             write_session_files(plan)
-            return run_plan(plan, popen, cwd=cat.cwd, on_started=on_started)
+            return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started)
     cleanup_sessions(keep=d)
-    return run_plan(plan, popen, cwd=cat.cwd, on_started=on_started)  # the directory the catalog (and deny list) was built for
+    # the directory the catalog (and deny list) was built for, or the worktree of a resumed session
+    return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started)

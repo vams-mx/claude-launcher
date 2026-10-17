@@ -36,11 +36,12 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import worktree as wt_mod
 from .paths import claude_dir
 
 DEFAULT_LIMIT = 3
@@ -52,6 +53,8 @@ HEAD = 64 * 1024  # head window: first prompt, and a conversation record when th
 SIDECAR_MAX = 64 * 1024
 SCAN_SLACK = 40  # extra files looked at beyond `limit` (skipped files, mtime vs. activity order)
 PROMPT_CHARS = 60
+
+WT_MARK = "⎇"
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 # a prompt that is really a command, hook output or an interruption marker (Claude skips these too)
@@ -67,6 +70,11 @@ class RecentSession:
     name: str  # custom title, else AI title, else the shortened first prompt
     source: str  # "custom" | "ai" | "prompt" | "none"
     last_activity: datetime  # aware, UTC
+    # Set when the session belongs to another checkout of the repository (a git worktree, or the
+    # main checkout seen from a worktree): its label ("⎇ <worktree>") and the directory claude
+    # has to be started in to resume it. None for the current directory's own sessions.
+    worktree: str | None = None
+    cwd: str | None = None
 
     @property
     def custom(self) -> bool:
@@ -80,12 +88,18 @@ class RecentSession:
     def age(self, now: datetime | None = None) -> str:
         return age(self.last_activity, now)
 
+    @property
+    def mark(self) -> str:
+        """"⎇ <worktree>" for a session of another checkout, else ""."""
+        return f"{WT_MARK} {self.worktree}" if self.worktree else ""
+
     def label(self, now: datetime | None = None, width: int = 48) -> str:
-        return f"{shorten(self.name, width)} · {self.age(now)}"
+        return f"{shorten(self.name, width)} · {self.age(now)}" + (f" · {self.mark}" if self.worktree else "")
 
     def to_json(self, now: datetime | None = None) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "name_source": self.source, "custom_name": self.custom,
-                "last_activity": self.last_activity.isoformat(), "age": self.age(now)}
+                "last_activity": self.last_activity.isoformat(), "age": self.age(now),
+                "worktree": self.worktree, "cwd": self.cwd}
 
 
 @dataclass
@@ -304,11 +318,35 @@ def read_session(path: Path) -> RecentSession | str:
     return RecentSession(id=sid, name=name, source=source, last_activity=when)
 
 
-def _candidates(dirs: Iterable[Path]) -> list[tuple[float, Path]]:
-    out: list[tuple[float, Path]] = []
-    for d in dirs:
+@dataclass(frozen=True)
+class _Source:
+    """One project directory to read, and which checkout it belongs to."""
+    dir: Path
+    worktree: str | None = None  # label of another checkout, None for the current directory
+    cwd: str | None = None  # that checkout's directory
+
+
+def sources(cwd: str | os.PathLike[str], worktrees: bool = True) -> list[_Source]:
+    """The current directory's project dirs, then (with `worktrees`) those of the repository's
+    other checkouts: its git worktrees (`.claude/worktrees/*` included) and, seen from a worktree,
+    the main checkout. Bounded (worktree.MAX_CHECKOUTS) and read-only."""
+    out = [_Source(d) for d in project_dirs(cwd)]
+    if not worktrees:
+        return out
+    seen = {s.dir for s in out}
+    for co in wt_mod.other_checkouts(Path(cwd)):
+        for d in project_dirs(co.path):
+            if d not in seen:
+                seen.add(d)
+                out.append(_Source(d, co.label, str(co.path)))
+    return out
+
+
+def _candidates(srcs: Iterable[_Source]) -> list[tuple[float, Path, _Source]]:
+    out: list[tuple[float, Path, _Source]] = []
+    for src in srcs:
         try:
-            entries = list(os.scandir(d))
+            entries = list(os.scandir(src.dir))
         except OSError:
             continue
         for e in entries:
@@ -319,35 +357,44 @@ def _candidates(dirs: Iterable[Path]) -> list[tuple[float, Path]]:
             try:
                 if not e.is_file(follow_symlinks=False):
                     continue
-                out.append((e.stat(follow_symlinks=False).st_mtime, Path(e.path)))
+                out.append((e.stat(follow_symlinks=False).st_mtime, Path(e.path), src))
             except OSError:
                 continue
     out.sort(key=lambda x: x[0], reverse=True)
     return out
 
 
-def list_recent(cwd: str | os.PathLike[str], limit: int = DEFAULT_LIMIT) -> Recent:
-    """The project's sessions, newest activity first. Never raises."""
+def _tag(s: RecentSession, src: _Source) -> RecentSession:
+    return replace(s, worktree=src.worktree, cwd=src.cwd) if src.worktree else s
+
+
+def list_recent(cwd: str | os.PathLike[str], limit: int = DEFAULT_LIMIT, *, worktrees: bool = True) -> Recent:
+    """The project's sessions, newest activity first, including those of the repository's other
+    checkouts (marked) unless `worktrees` is False. Never raises."""
     try:
-        dirs = project_dirs(cwd)
+        srcs = sources(cwd, worktrees)
+        dirs = [s.dir for s in srcs]
         if not dirs:
             return Recent("empty", reason="no Claude Code sessions for this directory yet")
         if limit <= 0:
             return Recent("empty", reason="recent_sessions is 0", project_dirs=dirs)
-        found: list[RecentSession] = []
+        found: dict[str, RecentSession] = {}
         skipped: dict[str, int] = {}
-        files = _candidates(dirs)
-        for _, path in files[: limit + SCAN_SLACK]:
+        files = _candidates(srcs)
+        for _, path, src in files[: limit + SCAN_SLACK]:
             r = read_session(path)
             if isinstance(r, RecentSession):
-                found.append(r)
+                r = _tag(r, src)
+                old = found.get(r.id)  # the same id in two checkouts: the newer copy wins
+                if old is None or r.last_activity > old.last_activity:
+                    found[r.id] = r
                 if len(found) >= limit + 2:  # a little slack: mtime order ~ activity order
                     break
             else:
                 skipped[r] = skipped.get(r, 0) + 1
         if found:
-            found.sort(key=lambda s: s.last_activity, reverse=True)
-            return Recent("ok", found[:limit], project_dirs=dirs)
+            ordered = sorted(found.values(), key=lambda s: s.last_activity, reverse=True)
+            return Recent("ok", ordered[:limit], project_dirs=dirs)
         bad = skipped.get("unknown", 0) + skipped.get("unreadable", 0)
         if bad:
             return Recent("unavailable", reason=f"{bad} session file(s) could not be read or understood "
@@ -358,16 +405,17 @@ def list_recent(cwd: str | os.PathLike[str], limit: int = DEFAULT_LIMIT) -> Rece
         return Recent("unavailable", reason=f"could not list sessions: {exc}")
 
 
-def find(cwd: str | os.PathLike[str], session_id: str) -> RecentSession | None:
-    """One session of this project by id (None if absent, unreadable or not a valid id). Never raises."""
+def find(cwd: str | os.PathLike[str], session_id: str, *, worktrees: bool = True) -> RecentSession | None:
+    """One session of this project (or, with `worktrees`, of another checkout of its repository)
+    by id. None if absent, unreadable or not a valid id. Never raises."""
     if not ID_RE.match(session_id or ""):
         return None
     try:
-        for d in project_dirs(cwd):
-            p = d / f"{session_id}.jsonl"
+        for src in sources(cwd, worktrees):
+            p = src.dir / f"{session_id}.jsonl"
             if p.is_file() and not p.is_symlink():
                 r = read_session(p)
-                return r if isinstance(r, RecentSession) else None
+                return _tag(r, src) if isinstance(r, RecentSession) else None
     except Exception:  # noqa: BLE001
         return None
     return None

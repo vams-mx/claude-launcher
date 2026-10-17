@@ -27,6 +27,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Profiles.** Save combinations like `memory+github` or `research`, set a default and override it with flags.
 - **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), so you don't tick the same servers every time.
 - **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
+- **Worktrees.** Start a session, or a fork of a recent one, in its own git worktree (`claude -w`), named after the session. cm warns before Claude would reuse, reset or replace an existing worktree, and lists the sessions of the repository's worktrees too.
 - **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
 - **Keyboard-first screen.** ↑/↓ flow through every box, Space toggles, Enter launches. Seven sober themes, with WCAG-contrast text.
 - **Scriptable.** Every choice is also a flag, and anything after `--` goes to `claude` unchanged.
@@ -36,7 +37,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 ## Contents
 
 - [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Last selection per project](#last-selection-per-project) · [Themes](#themes)
-- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
+- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [Worktrees](#worktrees--w) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
 - [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
 - [Security](#security) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations) · [Development](#development)
@@ -129,6 +130,8 @@ cm --resume                          # claude's native resume picker, with your 
 cm --sessions                        # this project's recent sessions: id, age, name (--json too)
 cm --resume <id> --fork --name "Kafka retry"   # fork a session into a new, named one
 cm --mcp github --name "Release prep"          # a new session with a name
+cm --resume <id> --fork --name "X v2" --worktree   # fork into its own git worktree x-v2 (claude -w x-v2)
+cm --mcp none --worktree spike --tmux          # a new session in worktree "spike", inside tmux
 cm --list                            # everything that can be selected, with measured context cost
 cm --where                           # config home, MCP folders scanned, and where each server came from
 cm --forget-last                     # forget the screen's last selection for this project
@@ -141,14 +144,14 @@ cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchan
 ## The screen
 
 - **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
-- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork** and **Name**; see [Sessions](#sessions-recent-fork-name)) and **Profiles**.
+- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork**, **Name**, and **Worktree** with its name and **tmux**; see [Sessions](#sessions-recent-fork-name) and [Worktrees](#worktrees--w)) and **Profiles**.
 - **Bottom:** a live preview of the exact command (secrets redacted), the isolation mode, the session file directory, what will load, the hooks added, the estimated context cost and any warnings.
 
 | key | action |
 |---|---|
 | **↑ / ↓** | move row by row through every box. Past a box's last row you land on the next box. It stops at the top and bottom instead of wrapping. |
 | **Space** | toggle |
-| **Enter** | launch (on the Recent or profile list, open it). A new session with an empty Name asks once first: the cursor jumps to Name, and a second Enter launches without a name. |
+| **Enter** | launch (on the Recent or profile list, open it). A new session with an empty Name asks once first: the cursor jumps to Name, and a second Enter launches without a name. A worktree name that already exists, where Claude may reset or replace something, asks once too: the cursor jumps to the worktree name, and a second Enter launches. |
 | **Tab** | jump to the next box |
 | **Ctrl+S** | save the selection as a profile |
 | **Ctrl+R** | refresh the claude.ai connector list |
@@ -164,7 +167,7 @@ The screen opens with what you last launched from it in this project, else your 
 When you launch from the screen, cm remembers the selection for the current project, and the next `cm` there opens pre-filled with it and a note: *Pre-filled from your last launch in ~/work/api (Ctrl+N clears)*. The preview works as usual; Ctrl+N clears the lists.
 
 * **The project** is the git repository you are in, found by walking up to the nearest `.git` (git itself is never run), so every subdirectory of a repository shares one entry. A linked worktree (`git worktree add`) counts as its main repository (or its bare repository); a submodule is its own project. Outside a repository it is the directory itself. A repository at `$HOME` itself (dotfiles) only counts for `~`, not for every directory under it.
-* **What is remembered:** local MCP servers, connectors, plugins, cmux and the model. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork or the session name.
+* **What is remembered:** local MCP servers, connectors, plugins, cmux and the model. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork, the session name, Worktree (and its name) or tmux.
 * **When:** written only after a launch from the screen actually started `claude` (not on Esc, `--dry-run`, or when `claude` can't be started). Headless launches (`cm --mcp …`, `cm --profile …` without `-i`) never read or write it.
 * **Order** for what the screen opens with: explicit selection flags (`cm -i --mcp …`) > `--profile NAME` > the last selection for this project > the default profile > nothing. Flags or a profile replace the last selection entirely; they don't merge with it.
 * Items that no longer exist are dropped with a warning, like for profiles. A file that can't be read or understood is ignored with a warning, and a failure to save one only warns; neither ever stops a launch.
@@ -284,7 +287,7 @@ cm --profile memory+github --model sonnet   # flags override profile fields
 
 Profiles live in `~/.claude-launcher/profiles/<name>.json`. Names may use letters, digits, `.`, `_`, `+` and `-`. When a profile is loaded, entries that no longer exist (a removed server, a vanished connector, cmux on a machine without cmux) are dropped with a warning.
 
-A profile keeps the session *mode* (New / Continue / Resume) but never a session id, the Fork tick or a session name: those belong to one launch.
+A profile keeps the session *mode* (New / Continue / Resume) but never a session id, the Fork tick, a session name, Worktree or tmux: those belong to one launch (a hand-edited profile can't set them either).
 
 ## Sessions: recent, fork, name
 
@@ -293,7 +296,7 @@ The **Session** box on the screen:
 | control | what it does |
 |---|---|
 | **New / Continue last / Resume…** | as before: a new session, `--continue`, or claude's own resume picker (`--resume` without an id; type an id in the box below it to resume that one). |
-| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
+| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Sessions of the repository's other checkouts (its git worktrees, including Claude's `.claude/worktrees/*`, and the main checkout when you are in a worktree) are listed too, marked `· ⎇ <worktree>`, and are resumed from that worktree's directory (the preview says `runs in <worktree>`). Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
 | **Fork** | adds `--fork-session`: Claude continues the chosen conversation under a new session id and leaves the original as it was. Enabled when a session id is chosen (Recent or typed) and with Continue. |
 | **Name** | always visible; passed as `--name <name>` (shown in Claude's prompt box, `/resume` picker and terminal title). |
 
@@ -327,11 +330,53 @@ cm --mcp none --name "Scratch"             # headless launches never ask for a n
 
 **Where the list comes from.** cm reads Claude Code's own session transcripts, `~/.claude/projects/<project>/<session id>.jsonl` (`$CLAUDE_CONFIG_DIR/projects/…` when set), **read-only**: it never writes, renames, locks or deletes anything there, and shows only names, ids and times, never conversation content beyond the shortened first prompt used as a last-resort name. This file format is **not documented** by Anthropic; cm follows what Claude Code 2.1.281 writes:
 
-* `<project>` is the absolute working directory with every character other than `A–Z a–z 0–9` replaced by `-` (paths longer than 200 characters are cut and get a hash suffix, as Claude does). Only that directory is read, so only the current project's sessions appear.
+* `<project>` is the absolute working directory with every character other than `A–Z a–z 0–9` replaced by `-` (paths longer than 200 characters are cut and get a hash suffix, as Claude does). That directory is read, plus the one of each other checkout of the same git repository: the linked worktrees git records in `.git/worktrees/*/gitdir` and any `.claude/worktrees/*` checkout (at most 32, existing directories only, found by reading files; git is never run). Claude keeps a worktree session's transcript under the worktree's own path.
 * Only top-level `*.jsonl` files count; subdirectories (subagents, tool output) and `agent-*.jsonl` are skipped, as are empty files, files with only subagent (sidechain) records, and sessions with no real prompt or reply (e.g. just `/mcp`).
 * The name is the last `custom-title` record (from `/rename` or `--name`; an empty one means cleared), else the last `ai-title`, else the first real prompt shortened to 60 characters. The last activity is the newest record `timestamp` (else the file's modification time).
 * Each file is read from the end first (titles are re-appended near the end), in windows of at most 1 MB from the end and 64 KB from the start, so large transcripts stay cheap. The screen reads them in a background worker and never waits for them.
 * Unknown record types and malformed lines are ignored. If no file can be understood at all, the selector and `cm --sessions` say `unavailable` and everything else works as before.
+
+## Worktrees (`-w`)
+
+**Worktree** starts the session in a git worktree with `claude -w <name>`, so a fork (or a new session) gets its own directory and branch, clearly apart from the original:
+
+```
+claude … --fork-session --name 'X v2' -w x-v2 --resume <id>
+```
+
+| control | what it does |
+|---|---|
+| **Worktree** | adds `-w <name>`. Enabled inside a git repository, with New, Resume and Fork. Disabled (with the reason shown under it) outside a repository, with Continue, and when `-w`/`--worktree`/`--tmux` are already in the arguments after `--`. |
+| **worktree name** | follows **Name** as a slug (`FORCE Kafka reconciliation` → `force-kafka-reconciliation`, `X (fork)` → `x-fork`: ASCII lower case, every other run of characters becomes one `-`, at most 64 characters) until you edit it yourself. With an empty Name it is `cm-<yyyymmdd>-<4 hex>`, generated once per screen (Claude's own default, three random words, can't be known in advance, so cm couldn't preview or check it). Names must follow Claude's rule: up to 64 characters of letters, digits, `.`, `_`, `-` (with `/` between parts), no `.`/`..`/`.git` part; cm also refuses a leading `-`, which Claude would read as an option. |
+| **tmux** | adds `--tmux`. Enabled only with Worktree, for a new session or a Fork, and only when `tmux` is installed. |
+
+With **Fork + Worktree** the Name stays editable, pre-filled with `<original name> (fork)`, and the command has exactly one `--name`. `--fork-session`, `--name`, `-w <name>` and `--tmux` go right before `--resume <id>`, which stays last. The preview's session line reads e.g. `fork of FORCE Kafka reconciliation → "X v2" in worktree x-v2`, followed by a **Worktree:** line with the path, the branch and whether it is new.
+
+From the command line, `--worktree [NAME]` (the same default rule: `--name` as a slug, else `cm-<date>-<id>`) and `--tmux`. Like `--name`, they are not selection flags: `cm --worktree` alone opens the screen with Worktree ticked. `--tmux` without `--worktree`, `--worktree` with `--continue`, `--tmux` with `--resume` but no `--fork`, an invalid name, and `--worktree`/`--tmux` together with `-w`/`--worktree`/`--tmux` after `--` are errors (exit 2).
+
+**An existing name.** cm looks (read-only) for `.claude/worktrees/<name>` and the branch `worktree-<name>`, says in the preview what Claude will do, and on the screen asks for a second Enter where Claude may reset or replace something:
+
+| found | what Claude does | screen | headless |
+|---|---|---|---|
+| nothing | creates the worktree and branch `worktree-<name>` from origin's default branch | launches | launches |
+| a worktree of this repository at that path | **reuses** it. If it has no changes (untracked files count) and its commits are already upstream, it first runs `git reset --hard` to origin's default branch, which loses nothing that isn't upstream | warns, second Enter | warns on stderr, launches |
+| branch `worktree-<name>` but no directory | recreates the worktree with `git worktree add -B`, which **resets that branch** to the base: commits only on it then survive only in the reflog | warns, second Enter | **refused** (exit 2): pick another name or confirm on the screen |
+| a directory whose git metadata is gone | deletes and recreates it (Claude refuses if its branch has unpushed commits) | warns, second Enter | **refused** (exit 2) |
+| a directory that isn't a worktree of this repository, a symlink, or the branch checked out elsewhere | refuses to start | can't launch (error in the preview) | error (exit 2) |
+
+cm never creates, deletes or resets a worktree itself: it only passes the flags and reads files under `.git` and `.claude/worktrees`.
+
+**What was verified, and how.** By reading Claude Code 2.1.281's bundled code (no session started, no API call):
+
+* `-w` alone: the worktree is created (or reused) under the **main checkout's** `.claude/worktrees/<name>` (`/` in the name becomes `+`), even when started from inside another worktree, on branch `worktree-<name>` based on `origin/<default branch>` (setting `worktree.baseRef`, default `fresh`; `head` uses the current `HEAD` and never resets). Claude then runs with the worktree as its directory.
+* `-w` + `--resume <id>`: allowed. The session keeps its id and Claude moves it into the new worktree (its previous worktree binding is replaced; that worktree stays on disk). The preview says so; tick Fork to leave the original alone.
+* `-w` + `--resume <id> --fork-session`: allowed. The fork gets a new id and runs in the new worktree; the original session and its worktree are untouched.
+* `-w` + `--continue` (with or without `--fork-session`): not rejected, but `--continue` then looks only at the new worktree's own sessions, so a new worktree fails with "No conversation found to continue". cm disables it.
+* Transcripts of a worktree session live under the **worktree's** path (`~/.claude/projects/<encoded worktree path>/`). `--resume <id>` finds a session in any worktree of the repository (it falls back to `git worktree list`), and resuming a session Claude started with `-w` switches back into its worktree by itself; cm still starts `claude` in the session's own checkout, which is what a session started there without `-w` needs.
+* `--tmux` requires `-w` ("--tmux requires --worktree") and an installed `tmux`. Claude then creates or reuses the worktree, and restarts itself inside `tmux new-session -A -s <repo>_worktree-<name>` **without** `-w`. That is why cm allows tmux only for a new session or a Fork: a plain resume in there would follow the session's own worktree, not the new one (inferred from the code). If that tmux session already exists, Claude just attaches to it and the new options are not used. In iTerm2 it uses tmux's `-CC` mode.
+* Inferred, not run: the order of the reset checks above and what git does with `-B`; that the inner tmux Claude sees cm's environment only when tmux starts a new server.
+
+**cmux restore.** cmux restores a session by replaying the original command plus `--resume <id>`, so a session started with `-w <name>` comes back with `-w <name>`. Usually that is harmless: the worktree still exists and is reused (only reset when it is clean and fully upstream, which loses nothing). Two cases can differ, and cm can't change the replayed command: if the worktree directory was removed but its branch kept, the replay recreates it with `-B` and resets that branch (see [Limitations](#limitations)); and with `--tmux`, an open tmux session for that worktree is attached to as it is. A fork that is restored may fork once more (see Limitations).
 
 ## claude.ai connectors
 
@@ -515,6 +560,8 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 * A cmux restore replays the command line but not the environment cm set (see [Security](#security)), and it fails once the session's files have been cleaned up after `session_retention_days` without use.
 * The Recent list depends on Claude Code's undocumented transcript format (verified on 2.1.281). A future format change makes it say `unavailable` rather than break cm, but it may then list nothing until cm is updated.
 * A cmux restore replays the original command line. For a session started as a fork that line contains `--fork-session`; whether cmux drops it when it adds its own `--resume <id>` is up to cmux and not verified, so a restore could fork once more.
+* **cmux restore with `-w`.** The replayed command contains `-w <name>`. If you removed that worktree's directory but kept its branch `worktree-<name>`, the restore makes Claude recreate it with `git worktree add -B`, resetting the branch to origin's default branch (its own commits stay only in the reflog: `git reflog show worktree-<name>`). cm can't intercept a cmux restore, so it can't warn there; keep the directory, or delete the branch too (`git branch -D worktree-<name>` once its work is merged or not needed). A restored `--tmux` session attaches to a still-open tmux session as it is. With `-w`, `--continue` isn't offered at all.
+* **Worktree sessions and the deny list.** The catalog (and in deny-list mode the list of blocked servers) is built for the directory cm runs in. Claude also reads the worktree's own `.mcp.json`; a project server defined only on the worktree's branch isn't known to cm, so in deny-list mode (connectors selected) it isn't blocked. Strict mode is unaffected.
 * Built-in plugins can't be disabled per session. Measured costs come from Haiku and differ slightly on other models.
 * A real Linux run of the installer and of `cm setup agentmemory`'s systemd step is covered by tests with stubbed commands, but not by CI on a Linux machine yet.
 

@@ -522,3 +522,19 @@ def test_arrows_and_enter_still_work_with_the_note(catalog):
 
     result = drive(app, steps)
     assert result[0] == "launch" and result[1].local == ["gdrive"]
+
+
+def test_worktree_and_tmux_are_never_remembered(fake_home, screen):
+    screen.result = Selection(local=["gdrive"], name="Wt", worktree="wt", tmux=True)
+    assert run() == 0
+    assert screen.launched[-1][0].worktree == "wt"  # it was launched with them
+    [f] = last_files(fake_home.home)
+    doc = json.loads(f.read_text())
+    assert not {"worktree", "tmux", "launch_dir"} & set(doc["selection"])
+    # even a hand-edited file can't bring them back
+    write_last(fake_home.project, {"local": ["gdrive"], "worktree": "x", "tmux": True, "launch_dir": "/tmp"},
+               worktree="x", tmux=True)
+    screen.result = None
+    assert run() == 0
+    sel, _ = screen.opened[-1]
+    assert sel.local == ["gdrive"] and sel.worktree is None and not sel.tmux and sel.launch_dir is None

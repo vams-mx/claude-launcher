@@ -33,6 +33,8 @@ from typing import Any
 
 from .paths import config_dir, home, tilde
 from .plan import MODELS, Selection
+from .worktree import gitdir_of as _gitdir_of
+from .worktree import worktree_repo as _worktree_repo
 
 FORMAT = 1
 KEY_LEN = 32  # hex chars (128 bits)
@@ -46,39 +48,6 @@ def last_dir() -> Path:
 
 # ---------------------------------------------------------------------------
 # the project key
-
-
-def _gitdir_of(dotgit: Path) -> Path | None:
-    """The directory a `.git` *file* points to ("gitdir: <path>", relative to the file's directory)."""
-    try:
-        with open(dotgit, encoding="utf-8") as fh:
-            first = fh.readline(4096)
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not first.startswith("gitdir:"):
-        return None
-    target = first[len("gitdir:"):].strip()
-    if not target:
-        return None
-    p = Path(target)
-    return Path(os.path.realpath(p if p.is_absolute() else dotgit.parent / p))
-
-
-def _worktree_repo(gitdir: Path) -> Path | None:
-    """For a linked worktree (`git worktree add`), whose gitdir has a `commondir` file: the main
-    checkout, or the repository itself when it is bare. None for anything else (a submodule,
-    `--separate-git-dir`), which is then its own project."""
-    try:
-        raw = (gitdir / "commondir").read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not raw:
-        return None
-    c = Path(raw)
-    common = Path(os.path.realpath(c if c.is_absolute() else gitdir / c))
-    if not common.is_dir():
-        return None
-    return common.parent if common.name == ".git" else common
 
 
 def project_root(cwd: Path) -> Path:

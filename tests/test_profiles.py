@@ -61,3 +61,13 @@ def test_profiles_never_keep_a_session_id_fork_or_name(fake_home):
     (profiles.profiles_dir() / "h.json").write_text(json.dumps({"resume_id": "x", "fork": True, "name": "n"}))
     loaded = profiles.load("h")
     assert (loaded.resume_id, loaded.fork, loaded.name) == (None, False, None)
+
+
+def test_profiles_never_keep_worktree_tmux_or_launch_dir(fake_home):
+    import json
+
+    p = profiles.save("wt", Selection(local=["gdrive"], worktree="x", tmux=True, launch_dir="/tmp/x"))
+    assert not {"worktree", "tmux", "launch_dir"} & set(json.loads(p.read_text()))
+    p.write_text(json.dumps({"local": ["gdrive"], "worktree": "x", "tmux": True, "launch_dir": "/tmp/x"}))
+    sel = profiles.load("wt")  # a hand-edited profile can't set them either
+    assert sel.worktree is None and not sel.tmux and sel.launch_dir is None

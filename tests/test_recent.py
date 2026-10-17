@@ -245,7 +245,8 @@ def test_to_json_has_no_conversation_content_beyond_the_fallback_name(fake_home)
                                               rec_user("second prompt must not appear", 0.5)])
     doc = json.dumps([s.to_json() for s in recent.list_recent(fake_home.project).sessions])
     assert "second prompt" not in doc and "x" * 61 not in doc
-    assert set(json.loads(doc)[0]) == {"id", "name", "name_source", "custom_name", "last_activity", "age"}
+    assert set(json.loads(doc)[0]) == {"id", "name", "name_source", "custom_name", "last_activity", "age",
+                                       "worktree", "cwd"}
 
 
 def test_ts_helper_is_parsed(fake_home):

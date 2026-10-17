@@ -41,6 +41,7 @@ from typing import Any
 
 from . import cmux as cmux_mod
 from . import sessions as sessions_mod
+from . import worktree as wt_mod
 from .catalog import Catalog
 
 MODELS = ("default", "sonnet", "opus", "haiku")
@@ -60,6 +61,9 @@ class Selection:
     resume_id: str | None = None
     fork: bool = False  # --fork-session (needs a resume id or continue)
     name: str | None = None  # --name, the session's display name
+    worktree: str | None = None  # -w <name>: start in a new (or that) git worktree; None = off
+    tmux: bool = False  # --tmux (only together with -w)
+    launch_dir: str | None = None  # start claude here instead of the catalog's cwd (a worktree's session)
     extra_args: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -91,8 +95,8 @@ class PlanError(ValueError):
     pass
 
 
-# Per-launch values: never stored in a profile.
-LAUNCH_ONLY = ("resume_id", "fork", "name")
+# Per-launch values: never stored in a profile (nor in the remembered last selection).
+LAUNCH_ONLY = ("resume_id", "fork", "name", "worktree", "tmux", "launch_dir")
 
 
 def session_name(sel: Selection) -> str | None:
@@ -108,6 +112,13 @@ def session_name(sel: Selection) -> str | None:
 def passthrough_name(args: list[str]) -> bool:
     """Whether the arguments forwarded after `--` already name the session (claude's -n/--name)."""
     return any(a in ("--name", "-n") or a.startswith("--name=") for a in args)
+
+
+def passthrough_worktree(args: list[str]) -> bool:
+    """Whether the arguments forwarded after `--` already ask for a worktree or tmux (claude's
+    -w/--worktree, --tmux)."""
+    return any(a in ("-w", "--worktree", "--tmux") or a.startswith(("--worktree=", "--tmux="))
+               or (a.startswith("-w") and not a.startswith("--")) for a in args)
 
 
 def can_fork(sel: Selection) -> bool:
@@ -163,6 +174,32 @@ def build_plan(
     name = session_name(sel)
     if name and passthrough_name(sel.extra_args):
         raise PlanError("the session is named twice (--name and a --name/-n after --); keep only one")
+    if sel.tmux and sel.worktree is None:
+        raise PlanError("tmux needs a worktree (claude's --tmux only works with -w)")
+    if sel.worktree is not None:
+        if bad := wt_mod.valid_name(sel.worktree):
+            raise PlanError(bad)
+        if passthrough_worktree(sel.extra_args):
+            raise PlanError("the worktree is given twice (cm's worktree and a -w/--worktree/--tmux after --); "
+                            "keep only one")
+        if why := wt_mod.combination_error(sel):
+            raise PlanError(why)
+        if sel.tmux and not wt_mod.tmux_available():
+            raise PlanError("tmux is not installed (claude --tmux needs it)")
+        repo = wt_mod.find_repo(cat.cwd)
+        if repo is None:
+            raise PlanError("a worktree needs a git repository (claude -w can only create one inside a repository)")
+        st = wt_mod.inspect(repo, sel.worktree)
+        if st.kind == wt_mod.REFUSE:
+            raise PlanError(f"worktree {sel.worktree}: {st.message}")
+        if sel.session == "resume" and not sel.fork:
+            warnings.append(f"resume with -w: claude moves the session itself into worktree {sel.worktree} "
+                            "(its previous worktree, if any, stays on disk); tick Fork to leave the original "
+                            "session as it is")
+        if sel.tmux:
+            warnings.append("tmux: claude restarts inside a tmux session for this worktree; if that tmux session "
+                            "is still open it only attaches to it and this launch's options are not used. "
+                            "cm's environment variables reach Claude only if tmux starts a new server")
 
     # --- MCP servers --------------------------------------------------------
     servers: dict[str, Any] = {}
@@ -265,6 +302,11 @@ def build_plan(
         argv.append("--fork-session")
     if name:
         argv += ["--name", name]  # a required option value: claude takes it even if it starts with "-"
+    if sel.worktree is not None:
+        # -w takes an optional value: always give one (a valid name never starts with "-")
+        argv += ["-w", sel.worktree]
+        if sel.tmux:
+            argv.append("--tmux")
     if sel.session == "resume":
         # --resume takes an optional value; keep it last so it never eats a forwarded arg
         argv += ["--resume", sel.resume_id] if sel.resume_id else ["--resume"]

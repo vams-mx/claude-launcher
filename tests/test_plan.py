@@ -234,3 +234,63 @@ def test_session_line(catalog):
     unknown = Selection(session="resume", resume_id="zzz-99999999", fork=True)
     assert session_line(unknown) == "fork of zzz-9999 (unnamed)"
     assert session_line(Selection(extra_args=["-n", "x"])) == "new (named by the arguments after --)"
+
+
+# --- worktree and tmux ----------------------------------------------------------
+
+
+def test_worktree_argv_for_each_combination(catalog):
+    p = plan_for(catalog, worktree="x", name="X")
+    assert p.argv[-4:] == ["--name", "X", "-w", "x"]
+    p = plan_for(catalog, worktree="x", tmux=True)
+    assert p.argv[-3:] == ["-w", "x", "--tmux"] and any("tmux" in w for w in p.warnings)
+    p = plan_for(catalog, session="resume", resume_id="abc-1", fork=True, name="X v2", worktree="x-v2",
+                 extra_args=["--verbose"])
+    assert p.argv[-8:] == ["--verbose", "--fork-session", "--name", "X v2", "-w", "x-v2", "--resume", "abc-1"]
+    assert p.argv.count("--name") == 1 and p.argv[-2] == "--resume"
+    p = plan_for(catalog, session="resume", resume_id="abc-1", fork=True, worktree="f", tmux=True)
+    assert p.argv[-6:] == ["--fork-session", "-w", "f", "--tmux", "--resume", "abc-1"]
+    p = plan_for(catalog, session="resume", resume_id="abc-1", worktree="w")  # supported, with a warning
+    assert p.argv[-4:] == ["-w", "w", "--resume", "abc-1"]
+    assert any("moves the session itself into worktree w" in w for w in p.warnings)
+    p = plan_for(catalog, session="resume", worktree="w")  # claude's picker
+    assert p.argv[-3:] == ["-w", "w", "--resume"]
+    assert "-w" not in plan_for(catalog).argv and "--tmux" not in plan_for(catalog).argv
+
+
+@pytest.mark.parametrize("kw,match", [
+    ({"tmux": True}, "tmux needs a worktree"),
+    ({"session": "continue", "worktree": "x"}, "Continue"),
+    ({"session": "continue", "fork": True, "worktree": "x"}, "Continue"),
+    ({"session": "resume", "resume_id": "a", "worktree": "x", "tmux": True}, "needs Fork"),
+    ({"worktree": "bad name"}, "invalid worktree name"),
+    ({"worktree": ""}, "empty"),
+    ({"worktree": "-x"}, "start with"),
+    ({"worktree": "x", "extra_args": ["-w", "y"]}, "given twice"),
+    ({"worktree": "x", "extra_args": ["--worktree=y"]}, "given twice"),
+    ({"worktree": "x", "extra_args": ["--tmux"]}, "given twice"),
+])
+def test_worktree_combinations_claude_cannot_do(catalog, kw, match):
+    with pytest.raises(PlanError, match=match):
+        plan_for(catalog, **kw)
+
+
+def test_worktree_needs_a_repository_tmux_and_a_usable_name(fake_home, monkeypatch, tmp_path):
+    from claude_launcher import worktree
+    from claude_launcher.catalog import discover
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(PlanError, match="git repository"):
+        plan_for(discover(plain), worktree="x")
+    cat = discover(fake_home.project)
+    monkeypatch.setattr(worktree, "tmux_available", lambda: False)
+    with pytest.raises(PlanError, match="tmux is not installed"):
+        plan_for(cat, worktree="x", tmux=True)
+    (fake_home.project / ".claude" / "worktrees" / "junk").mkdir(parents=True)  # claude would refuse it
+    with pytest.raises(PlanError, match="not a git worktree"):
+        plan_for(cat, worktree="junk")
+
+
+def test_passthrough_worktree_alone_is_passed_through(catalog):
+    assert plan_for(catalog, extra_args=["-w", "mine"]).argv[-2:] == ["-w", "mine"]

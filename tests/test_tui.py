@@ -381,11 +381,15 @@ def test_arrows_flow_from_box_to_box(catalog):
         assert app.focused.id == "name"
         await pilot.press("down")
         await pilot.pause()
+        # Worktree; its name and tmux are disabled until it is ticked
+        assert app.focused.id == "worktree"
+        await pilot.press("down")
+        await pilot.pause()
         assert app.focused.id == "profile"
         await pilot.press("down")  # a closed Select passes Down on; it doesn't open
         await pilot.pause()
         assert not app.query_one("#profile", Select).expanded and app.focused.id == "profile_name"
-        await pilot.press("up", "up", "up")
+        await pilot.press("up", "up", "up", "up")
         await pilot.pause()
         assert app.focused.id == "session"
         assert app.return_value is None

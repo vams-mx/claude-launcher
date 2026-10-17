@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from rich.text import Text
 
 from . import costs as costs_mod
 from . import sessions as sessions_mod
+from . import worktree as wt_mod
 from .catalog import Catalog
 from .paths import tilde
 from .plan import LaunchPlan, PlanError, Selection, build_plan, passthrough_name, session_name
@@ -46,10 +48,16 @@ def session_line(sel: Selection, titles: Mapping[str, str] | None = None) -> str
     except PlanError:
         name = None
     if name:
-        return f'{base} → "{name}"'
-    if passthrough_name(sel.extra_args):
-        return f"{base} (named by the arguments after --)"
-    return f"{base} (unnamed)" if sel.session == "new" or sel.fork else base
+        line = f'{base} → "{name}"'
+    elif passthrough_name(sel.extra_args):
+        line = f"{base} (named by the arguments after --)"
+    else:
+        line = f"{base} (unnamed)" if sel.session == "new" or sel.fork else base
+    if sel.worktree:
+        line += f" in worktree {sel.worktree}" + (" (tmux)" if sel.tmux else "")
+    if sel.launch_dir:
+        line += f" · runs in {Path(sel.launch_dir).name} ({tilde(Path(sel.launch_dir))})"
+    return line
 
 
 def env_line(plan: LaunchPlan) -> str:
@@ -75,7 +83,8 @@ DEFAULT_PALETTE = {"cmd": "cyan", "ok": "green", "warn": "yellow", "bad": "red",
 
 
 def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost],
-           palette: dict[str, str] | None = None, titles: Mapping[str, str] | None = None) -> Text:
+           palette: dict[str, str] | None = None, titles: Mapping[str, str] | None = None,
+           repo: wt_mod.Repo | None = None) -> Text:
     c = palette or DEFAULT_PALETTE
     t = Text()
     t.append("Command\n", style="bold")
@@ -87,6 +96,16 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
     t.append(mode + "\n", style=c["ok"] if plan.mode == "strict" else c["warn"])
     t.append("Session: ", style="bold")
     t.append(session_line(sel, titles) + "\n")
+    if sel.worktree:
+        repo = repo or wt_mod.find_repo(cat.cwd)
+        st = wt_mod.inspect(repo, sel.worktree) if repo else None
+        t.append("Worktree: ", style="bold")
+        if st is None:
+            t.append(f"{sel.worktree} (not inside a git repository?)\n", style=c["warn"])
+        else:
+            t.append(f"{tilde(st.path)} · branch {st.branch}", style="dim")
+            t.append(f"  {st.message}\n" if st.exists else "  (new)\n",
+                     style=c["warn"] if st.exists else "dim")
     t.append("Session files: ", style="bold")
     t.append(session_note(plan) + "\n", style="dim")
 

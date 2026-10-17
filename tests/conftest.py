@@ -54,6 +54,10 @@ def no_real_processes(monkeypatch):
     import claude_launcher.compat as compat
 
     monkeypatch.setattr(compat, "installed_version", lambda claude_bin, run=None, timeout=5: compat.VERIFIED_VERSIONS[0])
+    # tmux on PATH or not must not change the results: pretend it is installed
+    import claude_launcher.worktree as worktree
+
+    monkeypatch.setattr(worktree, "tmux_available", lambda: True)
 
 
 @pytest.fixture
