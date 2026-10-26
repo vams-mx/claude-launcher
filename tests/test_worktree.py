@@ -135,7 +135,7 @@ def test_recent_worktree_reads_stay_bounded(fake_home, monkeypatch):
     main = fake_home.project
     reads = []
     real = recent.read_session
-    monkeypatch.setattr(recent, "read_session", lambda p: reads.append(p) or real(p))
+    monkeypatch.setattr(recent, "read_session", lambda p, **kw: reads.append(p) or real(p, **kw))
     for i in range(4):
         w = add_worktree(main, main / ".claude" / "worktrees" / f"w{i}")
         for j in range(20):
@@ -252,3 +252,48 @@ def test_combinations():
     assert "Continue" in wt.combination_error(Selection(session="continue", fork=True, worktree="x"))
     assert "needs Fork" in wt.combination_error(Selection(session="resume", resume_id="a", worktree="x", tmux=True))
     assert wt.combination_error(Selection()) is None
+
+
+def test_session_moved_into_a_worktree_resumes_from_there(fake_home):
+    # `claude -w x --resume <id>` keeps the transcript with the main checkout, but the conversation
+    # now runs in the worktree (its records' cwd); resuming from the main checkout lands in the wrong
+    # directory, so cm follows the last cwd back into that worktree.
+    main = fake_home.project
+    a = add_worktree(main, main / ".claude" / "worktrees" / "prod-pilot")
+    write_session(main, SID[0], [rec_user("start here", 3, cwd=str(main)), rec_assistant(3, cwd=str(main)),
+                                 rec_user("continue in wt", 1, cwd=str(a / "src")), rec_assistant(1, cwd=str(a / "src")),
+                                 rec_custom("Prod_Pilot")], hours_ago=1)
+    write_session(main, SID[1], [rec_user("stays in main", 2, cwd=str(main)), rec_assistant(2), rec_custom("Main")],
+                  hours_ago=2)
+
+    res = recent.list_recent(main, 5)
+    assert [(s.id, s.worktree, s.cwd) for s in res.sessions] == [(SID[0], "prod-pilot", str(a)), (SID[1], None, None)]
+    assert res.sessions[0].label().endswith("· ⎇ prod-pilot")
+    assert "last_cwd" not in res.sessions[0].to_json()  # internal only
+    found = recent.find(main, SID[0])
+    assert found and found.cwd == str(a)
+    # without worktree support, or when the last cwd isn't a checkout of this repo, nothing changes
+    assert recent.list_recent(main, 5, worktrees=False).sessions[0].cwd is None
+    write_session(main, SID[2], [rec_user("elsewhere", 0.5, cwd="/somewhere/else"), rec_assistant(0.5),
+                                 rec_custom("Other")], hours_ago=0.5)
+    assert recent.find(main, SID[2]).cwd is None
+
+
+def test_session_that_left_its_worktree_still_resumes_there(fake_home):
+    # Claude records worktree-state with the worktree path, then `worktreeSession: null` once the
+    # session leaves it; a later resume ran in the main checkout. The worktree is still there, so cm
+    # takes the session back to it.
+    main = fake_home.project
+    a = add_worktree(main, main / ".claude" / "worktrees" / "prod-pilot")
+    state = lambda path: {"type": "worktree-state", "sessionId": "s",
+                          "worktreeSession": None if path is None else {"worktreePath": str(path),
+                                                                         "worktreeName": "prod-pilot"}}
+    write_session(main, SID[0], [state(a), rec_user("in wt", 3, cwd=str(a)), rec_assistant(3, cwd=str(a)),
+                                 state(None), rec_user("back in main", 1, cwd=str(main)),
+                                 rec_assistant(1, cwd=str(main)), rec_custom("Prod_Pilot")], hours_ago=1)
+    s = recent.find(main, SID[0])
+    assert s and s.worktree == "prod-pilot" and s.cwd == str(a)
+    # once the worktree directory is gone there is nothing to go back to
+    import shutil
+    shutil.rmtree(a)
+    assert recent.find(main, SID[0]).cwd is None

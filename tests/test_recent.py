@@ -179,7 +179,12 @@ def test_large_file_tail_first_and_bounded(fake_home, monkeypatch):
     monkeypatch.setattr("builtins.open", spy_open)
     s = recent.read_session(p)
     assert (s.name, s.source) == ("Tail name", "custom")
-    assert sum(reads) == recent.TAIL_FIRST  # found in the first tail window: nothing else read
+    assert reads == [recent.TAIL_FIRST]  # found in the first tail window: nothing else read
+    # only when the repo has other checkouts to resume into is the head read too (a worktree the
+    # session entered is recorded near the start); still bounded
+    reads.clear()
+    s = recent.read_session(p, want_worktree=True)
+    assert s.name == "Tail name" and reads == [recent.TAIL_FIRST, recent.HEAD]
     assert p.stat().st_size > 2 * recent.TAIL_MAX
 
 

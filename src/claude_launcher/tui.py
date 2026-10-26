@@ -14,6 +14,11 @@ launching a new session with an empty name asks once first, and a worktree
 name that already exists (claude may reset or replace it) asks once too.
 Combinations claude can't do are disabled, with the reason below them.
 
+Keep awake (macOS only; not shown elsewhere): Off / System (-ims) / System +
+display (-dims), i.e. `caffeinate -<flags> -w <claude pid>` for as long as
+claude runs (awake.py). Whether the Mac is on battery is read once at startup,
+off the UI thread, for the preview's battery note.
+
 Opened without selection flags, the screen starts from the selection last
 launched from it in this project (remember.py; cli.py decides) and says so in
 a note at the top, which Ctrl+N (clear all) or loading a profile hides.
@@ -33,6 +38,7 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection as Item
 
+from . import awake as awake_mod
 from . import compat, health, profiles
 from . import config as config_mod
 from . import recent as recent_mod
@@ -183,6 +189,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self._wt_confirmed: str | None = None  # worktree name whose "exists" warning one Enter confirmed
         self._wt_confirm_msg = ""
         self._disarm_timer: Timer | None = None
+        self.power: str | None = None  # "battery" / "ac" / None: read once at startup (_check_power)
         for t in themes.CUSTOM:
             self.register_theme(t)
         self.theme = self._configured_theme()
@@ -218,6 +225,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     for k, v in PERM_LABELS.items():
                         yield RadioButton(v, value=self.sel.permissions == k, name=k,
                                           classes="danger" if k == "skip" else "")
+                # macOS only: elsewhere hidden (out of the focus chain); a stored value is carried, not used
+                awake_label = Label("Keep awake", classes="group", id="awake_label")
+                awake_label.display = awake_mod.supported()
+                yield awake_label
+                with FlowRadioSet(id="awake") as awake_box:
+                    awake_box.display = awake_mod.supported()
+                    for k, v in awake_mod.LABELS.items():
+                        yield RadioButton(v, value=self.sel.awake == k, name=k,
+                                          tooltip=f"caffeinate -{k} -w <claude pid>" if k != "off" else None)
                 yield Label("Session", classes="group")
                 with FlowRadioSet(id="session"):
                     for k, v in SESSION_LABELS.items():
@@ -264,6 +280,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             self.notify(n, severity="warning", timeout=6)
         self._check_health()
         self._check_version()
+        if awake_mod.supported():
+            self._check_power()
         if self.recent_limit > 0:
             self._load_recent(self.sel.resume_id if self.sel.session == "resume" else None)
         self.theme_changed_signal.subscribe(self, self._on_theme_changed)
@@ -385,6 +403,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             model=radio("model", "default"),
             permissions=radio("perm", "standard"),
             session=radio("session", "new"),
+            awake=radio("awake", "off"),
             resume_id=(self.query_one("#resume_id", Input).value.strip() or None),
             name=(self.query_one("#name", Input).value.strip() or None),
             extra_args=list(self.sel.extra_args),
@@ -421,7 +440,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.plan_ok = True
         pv.remove_class("error")
         pv.update(render(self.cat, self.sel, plan, self.costs, self._palette(), titles=self._titles(),
-                         repo=self.repo))
+                         repo=self.repo, power=self.power))
 
     # ------------------------------------------------------------------ session box
     def _titles(self) -> dict[str, str]:
@@ -552,7 +571,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     sl.select(v)
                 except Exception:  # value not present in this catalog
                     pass
-        for wid, value in (("model", sel.model), ("perm", sel.permissions), ("session", sel.session)):
+        for wid, value in (("model", sel.model), ("perm", sel.permissions), ("session", sel.session),
+                           ("awake", sel.awake)):
             for b in self.query_one(f"#{wid}", RadioSet).query(RadioButton):
                 if b.name == value:
                     b.value = True
@@ -840,6 +860,17 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         # `claude --version` is a process (up to 5 s): keep it off the startup path
         if w := compat.check(self.claude_bin):
             self.call_from_thread(self.notify, w, severity="warning", timeout=6)
+
+    @work(thread=True, exclusive=True, group="power")
+    def _check_power(self) -> None:
+        # `pmset -g batt` (read-only) is a process: keep it off the startup path, read it once
+        power = awake_mod.power_source()
+        if power is not None:
+            self.call_from_thread(self._apply_power, power)
+
+    def _apply_power(self, power: str) -> None:
+        self.power = power
+        self._update_preview()
 
     @work(thread=True, exclusive=True, group="health")
     def _check_health(self) -> None:

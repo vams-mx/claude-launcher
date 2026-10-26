@@ -12,6 +12,10 @@
   foreground process group while cm ignores them, SIGTERM/SIGHUP are
   forwarded, and Claude's exit status is returned (128+N for a signal).
 * stdin/stdout/stderr are inherited, so the TTY stays interactive.
+* Keep awake (macOS, awake.py): right after claude starts, `caffeinate -<flags> -w <claude pid>`
+  is started detached (own session, no terminal I/O). It exits by itself with claude, and
+  run_plan stops it in a `finally` on every exit path of cm too. A caffeinate that can't be
+  started never fails the launch: the warning is printed after claude exits.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import awake as awake_mod
 from . import config as config_mod
 from . import sessions
 from .catalog import Catalog
@@ -102,9 +107,13 @@ def exit_code(rc: int) -> int:
 
 
 def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = None,
-             cwd: Path | None = None, on_started: Callable[[], None] | None = None) -> int:
+             cwd: Path | None = None, on_started: Callable[[], None] | None = None,
+             awake: str = "off") -> int:
     """Start claude and wait for it. `on_started` runs once claude has actually been started
-    (never when it couldn't be); an exception from it is ignored."""
+    (never when it couldn't be); an exception from it is ignored.
+
+    `awake` != "off" (macOS): caffeinate is started (with the same `popen`) right after claude
+    and stopped again before this returns or raises, whatever ends the wait."""
     popen = popen or subprocess.Popen
     env = {k: v for k, v in os.environ.items() if k not in plan.env_unset}
     env.update(plan.env_overrides)
@@ -116,15 +125,26 @@ def run_plan(plan: LaunchPlan, popen: Callable[..., subprocess.Popen] | None = N
     except PermissionError:
         print(f"cm: cannot run {plan.argv[0]!r}: permission denied", file=sys.stderr)
         return 126
-    if on_started is not None:
-        with contextlib.suppress(Exception):  # bookkeeping must never fail a launch
-            on_started()
-    with _child_signals(proc):
-        while True:
+    keeper = awake_mod.Keeper(awake, popen)
+    try:
+        with _child_signals(proc):
             try:
-                return exit_code(proc.wait())
-            except InterruptedError:  # pragma: no cover - PEP 475 retries, belt and braces
-                continue
+                if keeper.active:
+                    keeper.start(proc.pid)  # never raises
+                if on_started is not None:
+                    with contextlib.suppress(Exception):  # bookkeeping must never fail a launch
+                        on_started()
+                while True:
+                    try:
+                        return exit_code(proc.wait())
+                    except InterruptedError:  # pragma: no cover - PEP 475 retries, belt and braces
+                        continue
+            finally:
+                keeper.stop()  # still inside: Ctrl+C is ignored while caffeinate is reaped
+    finally:
+        keeper.stop()  # idempotent; covers an exception while the handlers were being set up
+        if keeper.warning:  # after claude exits: printed earlier it would land in claude's screen
+            print(f"cm: warning: {keeper.warning}", file=sys.stderr)
 
 
 def launch_dir(cat: Catalog, sel: Selection) -> Path:
@@ -151,7 +171,7 @@ def launch(
         with temp_session_dir() as tmp:
             plan = build_plan(cat, sel, claude_bin=claude_bin, session_dir=tmp)
             write_session_files(plan)
-            return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started)
+            return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started, awake=sel.awake)
     cleanup_sessions(keep=d)
     # the directory the catalog (and deny list) was built for, or the worktree of a resumed session
-    return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started)
+    return run_plan(plan, popen, cwd=launch_dir(cat, sel), on_started=on_started, awake=sel.awake)

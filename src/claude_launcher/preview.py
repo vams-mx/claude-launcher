@@ -7,6 +7,7 @@ from pathlib import Path
 
 from rich.text import Text
 
+from . import awake as awake_mod
 from . import costs as costs_mod
 from . import sessions as sessions_mod
 from . import worktree as wt_mod
@@ -84,7 +85,8 @@ DEFAULT_PALETTE = {"cmd": "cyan", "ok": "green", "warn": "yellow", "bad": "red",
 
 def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost],
            palette: dict[str, str] | None = None, titles: Mapping[str, str] | None = None,
-           repo: wt_mod.Repo | None = None) -> Text:
+           repo: wt_mod.Repo | None = None, power: str | None = None) -> Text:
+    """`power`: "battery" / "ac" / None (unknown), from awake.power_source (read once by the caller)."""
     c = palette or DEFAULT_PALETTE
     t = Text()
     t.append("Command\n", style="bold")
@@ -106,6 +108,11 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
             t.append(f"{tilde(st.path)} · branch {st.branch}", style="dim")
             t.append(f"  {st.message}\n" if st.exists else "  (new)\n",
                      style=c["warn"] if st.exists else "dim")
+    if sel.awake != "off" and awake_mod.supported():  # off macOS a stored value is ignored silently
+        t.append("Keep awake: ", style="bold")
+        t.append(awake_mod.describe(sel.awake) + "\n")
+        if power == "battery":
+            t.append(f"  ⚠ {awake_mod.BATTERY_NOTE}\n", style=c["warn"])
     t.append("Session files: ", style="bold")
     t.append(session_note(plan) + "\n", style="dim")
 
@@ -139,10 +146,10 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
 
 
 def plain(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, costs_mod.Cost], *,
-          show_files: bool = False, titles: Mapping[str, str] | None = None) -> str:
+          show_files: bool = False, titles: Mapping[str, str] | None = None, power: str | None = None) -> str:
     import json
 
-    out = render(cat, sel, plan, costs, titles=titles).plain
+    out = render(cat, sel, plan, costs, titles=titles, power=power).plain
     if show_files:
         out += f"\n{tilde(plan.mcp_path)} (0600):\n" + json.dumps(redact_mcp_doc(plan.mcp_doc), indent=2,
                                                                  ensure_ascii=False)

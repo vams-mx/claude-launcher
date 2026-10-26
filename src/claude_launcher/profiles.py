@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 
+from . import awake as awake_mod
 from . import config as cfg_mod
 from .catalog import Catalog
 from .paths import config_dir
@@ -98,5 +99,10 @@ def reconcile(sel: Selection, cat: Catalog) -> tuple[Selection, list[str]]:
     cmux = sel.cmux and cat.cmux.available
     if sel.cmux and not cmux:
         notes.append("cmux is not installed here" if not cat.cmux.installed else f"cmux unavailable: {cat.cmux.reason}")
-    out = Selection.from_dict({**sel.to_dict(), "local": local, "connectors": conns, "plugins": plugins, "cmux": cmux})
+    # a hand-edited keep-awake value; a valid one is kept even where it's ignored (off macOS)
+    awake, note = awake_mod.normalize(sel.awake)
+    if note:
+        notes.append(note)
+    out = Selection.from_dict({**sel.to_dict(), "local": local, "connectors": conns, "plugins": plugins, "cmux": cmux,
+                               "awake": awake})
     return out, notes

@@ -62,8 +62,8 @@ COMMENT = [
     ("recent_sessions: how many of the current project's Claude Code sessions the screen's Recent selector and "
      "`cm --sessions` list (default 3, 0 hides the selector, max 50). Read-only from ~/.claude/projects."),
     ("remember_last: true (default) pre-fills the screen with what you last launched from it in the same project "
-     "(git root, else the directory): MCPs, connectors, plugins, cmux, model; never Skip permissions or the "
-     "session. Stored per machine in last/. false turns it off (nothing read or written); `cm --forget-last` "
+     "(git root, else the directory): MCPs, connectors, plugins, cmux, model, keep awake (macOS); never Skip "
+     "permissions or the session. Stored per machine in last/. false turns it off (nothing read or written); `cm --forget-last` "
      "forgets one project."),
     f"Docs: {DOCS_URL}",
 ]

@@ -10,6 +10,7 @@
   cm --resume <id> --fork --name "new name"    resume (or fork) a session, naming it
   cm --resume <id> --fork --name "X v2" --worktree [--tmux]   fork it into its own git worktree (claude -w x-v2)
   cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
+  cm --awake ims|dims|off         macOS: keep the Mac awake while claude runs (caffeinate -w <claude pid>)
   cm ... -- <args forwarded verbatim to claude>
   cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
   cm setup agentmemory            install and wire up AgentMemory (opt-in, asks first)
@@ -25,6 +26,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, compat
+from . import awake as awake_mod
 from . import config as cfg_mod
 from . import costs as costs_mod
 from . import profiles, recent, remember, sessions
@@ -83,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="start in a new git worktree (claude -w). NAME defaults to the session name as a "
                           "slug (--name \"X (fork)\" -> x-fork), else cm-<date>-<id>")
     sel.add_argument("--tmux", action="store_true", help="with --worktree: also open a tmux session (claude --tmux)")
+    # macOS only: hidden from --help elsewhere (and ignored with a note if given anyway)
+    sel.add_argument("--awake", choices=awake_mod.MODES, metavar="{off,ims,dims}",
+                     help=("keep the Mac awake while claude runs: ims = no idle/disk/system sleep "
+                           "(caffeinate -ims; -s only on AC power), dims = also keep the display on, off = no. "
+                           "Ends with claude; doesn't skip the screen by itself (like --name)")
+                     if awake_mod.supported() else argparse.SUPPRESS)
     sel.add_argument("-i", "--interactive", action="store_true", help="open the screen even with flags given")
 
     info = p.add_argument_group("catalog, profiles and costs")
@@ -198,6 +206,8 @@ def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str
     # "" = on, name still to be chosen (the screen derives it from Name; headless: _finish_worktree)
     sel.worktree = None if a.worktree is None else ("" if a.worktree == _WORKTREE_DEFAULT else a.worktree.strip())
     sel.tmux = bool(a.tmux)
+    if a.awake is not None:  # a launch preference: overrides the profile / last selection's value
+        sel.awake = a.awake
     if passthrough:
         sel.extra_args = passthrough
     return sel, notes
@@ -468,6 +478,9 @@ def main(argv: list[str] | None = None) -> int:
     assert a is not None
     claude_bin = a.claude_bin or shutil.which("claude") or "claude"
     cwd = Path(a.cwd).resolve() if a.cwd else Path.cwd()
+    if a.awake is not None and not awake_mod.supported():
+        _err("--awake is macOS only; ignored")  # a note, not an error: shared scripts keep working
+        a.awake = None
 
     # --- profile management that needs no catalog -------------------------------
     try:
@@ -636,6 +649,8 @@ def main(argv: list[str] | None = None) -> int:
         titles = {}
         if sel.session == "resume" and sel.resume_id and (found := recent.find(cat.cwd, sel.resume_id)):
             titles[found.id] = found.name
+        keep_awake = sel.awake != "off" and awake_mod.supported()
+        power = awake_mod.power_source() if keep_awake else None  # read-only `pmset -g batt`
         if a.json:
             from .preview import env_line, session_line
             from .redact import redact_mcp_doc, redact_settings
@@ -644,9 +659,12 @@ def main(argv: list[str] | None = None) -> int:
                               "session": session_line(sel, titles),
                               "session_dir": str(plan.mcp_path.parent),
                               "mcp": redact_mcp_doc(plan.mcp_doc), "settings": redact_settings(plan.settings_doc),
-                              "denied": plan.denied, "warnings": plan.warnings}, indent=2))
+                              "denied": plan.denied, "warnings": plan.warnings,
+                              "awake": {"mode": sel.awake,
+                                        "argv": awake_mod.caffeinate_argv(sel.awake, "<claude pid>"),
+                                        "power": power} if keep_awake else None}, indent=2))
         else:
-            print(plain(cat, sel, plan, costs_mod.load(), show_files=True, titles=titles))
+            print(plain(cat, sel, plan, costs_mod.load(), show_files=True, titles=titles, power=power))
         return 0
 
     if headless:

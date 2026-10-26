@@ -58,6 +58,12 @@ def no_real_processes(monkeypatch):
     import claude_launcher.worktree as worktree
 
     monkeypatch.setattr(worktree, "tmux_available", lambda: True)
+    # keep awake: behave like macOS everywhere (tests that need Linux patch PLATFORM), and never
+    # run `pmset -g batt` (power unknown; battery tests patch power_source)
+    import claude_launcher.awake as awake
+
+    monkeypatch.setattr(awake, "PLATFORM", "darwin")
+    monkeypatch.setattr(awake, "power_source", lambda run=None, timeout=2.0: None)
 
 
 @pytest.fixture
@@ -144,20 +150,39 @@ def catalog(fake_home):
 
 
 class FakeProc:
+    _next_pid = 40000
+
     def __init__(self, argv, rc=0, on_wait=None, **kw):
         self.argv = argv
         self.kw = kw
         self.rc = rc
         self.on_wait = on_wait
         self.signals = []
+        self.waits = 0
+        FakeProc._next_pid += 1
+        self.pid = FakeProc._next_pid
+        self.returncode = None
+        self.terminated = False
 
-    def wait(self):
+    def wait(self, timeout=None):
+        self.waits += 1
         if self.on_wait:
             self.on_wait(self)
+        self.returncode = self.rc
         return self.rc
+
+    def poll(self):
+        return self.returncode
 
     def send_signal(self, s):
         self.signals.append(s)
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
 
 
 @pytest.fixture

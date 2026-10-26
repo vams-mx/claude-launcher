@@ -457,6 +457,8 @@ def test_delete_needs_a_second_press(catalog):
     app = LauncherApp(catalog, Selection(), claude_bin="claude", profile="work")
 
     async def steps(app, pilot):
+        app.query_one("#delete").scroll_visible(animate=False)  # the right column scrolls
+        await pilot.pause()
         await pilot.click("#delete")
         await pilot.pause()
         assert profiles.list_profiles() == ["work"] and str(app.query_one("#delete").label) == "Confirm?"

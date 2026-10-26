@@ -28,6 +28,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), so you don't tick the same servers every time.
 - **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
 - **Worktrees.** Start a session, or a fork of a recent one, in its own git worktree (`claude -w`), named after the session. cm warns before Claude would reuse, reset or replace an existing worktree, and lists the sessions of the repository's worktrees too.
+- **Keep awake (macOS).** Optionally keep the Mac from sleeping for exactly as long as the session runs (`caffeinate -ims` or `-dims`, ended with Claude). Power settings are never changed.
 - **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
 - **Keyboard-first screen.** ↑/↓ flow through every box, Space toggles, Enter launches. Seven sober themes, with WCAG-contrast text.
 - **Scriptable.** Every choice is also a flag, and anything after `--` goes to `claude` unchanged.
@@ -37,7 +38,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 ## Contents
 
 - [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Last selection per project](#last-selection-per-project) · [Themes](#themes)
-- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [Worktrees](#worktrees--w) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
+- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [Worktrees](#worktrees--w) · [Keep awake](#keep-awake-macos) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
 - [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
 - [Security](#security) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations) · [Development](#development)
@@ -132,6 +133,7 @@ cm --resume <id> --fork --name "Kafka retry"   # fork a session into a new, name
 cm --mcp github --name "Release prep"          # a new session with a name
 cm --resume <id> --fork --name "X v2" --worktree   # fork into its own git worktree x-v2 (claude -w x-v2)
 cm --mcp none --worktree spike --tmux          # a new session in worktree "spike", inside tmux
+cm --mcp github --awake ims          # macOS: keep the Mac awake while this session runs
 cm --list                            # everything that can be selected, with measured context cost
 cm --where                           # config home, MCP folders scanned, and where each server came from
 cm --forget-last                     # forget the screen's last selection for this project
@@ -144,7 +146,7 @@ cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchan
 ## The screen
 
 - **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
-- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork**, **Name**, and **Worktree** with its name and **tmux**; see [Sessions](#sessions-recent-fork-name) and [Worktrees](#worktrees--w)) and **Profiles**.
+- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Keep awake** (macOS only: Off / System (-ims) / System + display (-dims); see [Keep awake](#keep-awake-macos)), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork**, **Name**, and **Worktree** with its name and **tmux**; see [Sessions](#sessions-recent-fork-name) and [Worktrees](#worktrees--w)) and **Profiles**.
 - **Bottom:** a live preview of the exact command (secrets redacted), the isolation mode, the session file directory, what will load, the hooks added, the estimated context cost and any warnings.
 
 | key | action |
@@ -167,7 +169,7 @@ The screen opens with what you last launched from it in this project, else your 
 When you launch from the screen, cm remembers the selection for the current project, and the next `cm` there opens pre-filled with it and a note: *Pre-filled from your last launch in ~/work/api (Ctrl+N clears)*. The preview works as usual; Ctrl+N clears the lists.
 
 * **The project** is the git repository you are in, found by walking up to the nearest `.git` (git itself is never run), so every subdirectory of a repository shares one entry. A linked worktree (`git worktree add`) counts as its main repository (or its bare repository); a submodule is its own project. Outside a repository it is the directory itself. A repository at `$HOME` itself (dotfiles) only counts for `~`, not for every directory under it.
-* **What is remembered:** local MCP servers, connectors, plugins, cmux and the model. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork, the session name, Worktree (and its name) or tmux.
+* **What is remembered:** local MCP servers, connectors, plugins, cmux, the model and Keep awake. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork, the session name, Worktree (and its name) or tmux.
 * **When:** written only after a launch from the screen actually started `claude` (not on Esc, `--dry-run`, or when `claude` can't be started). Headless launches (`cm --mcp …`, `cm --profile …` without `-i`) never read or write it.
 * **Order** for what the screen opens with: explicit selection flags (`cm -i --mcp …`) > `--profile NAME` > the last selection for this project > the default profile > nothing. Flags or a profile replace the last selection entirely; they don't merge with it.
 * Items that no longer exist are dropped with a warning, like for profiles. A file that can't be read or understood is ignored with a warning, and a failure to save one only warns; neither ever stops a launch.
@@ -287,7 +289,7 @@ cm --profile memory+github --model sonnet   # flags override profile fields
 
 Profiles live in `~/.claude-launcher/profiles/<name>.json`. Names may use letters, digits, `.`, `_`, `+` and `-`. When a profile is loaded, entries that no longer exist (a removed server, a vanished connector, cmux on a machine without cmux) are dropped with a warning.
 
-A profile keeps the session *mode* (New / Continue / Resume) but never a session id, the Fork tick, a session name, Worktree or tmux: those belong to one launch (a hand-edited profile can't set them either).
+A profile keeps the session *mode* (New / Continue / Resume) and Keep awake, but never a session id, the Fork tick, a session name, Worktree or tmux: those belong to one launch (a hand-edited profile can't set them either).
 
 ## Sessions: recent, fork, name
 
@@ -296,7 +298,7 @@ The **Session** box on the screen:
 | control | what it does |
 |---|---|
 | **New / Continue last / Resume…** | as before: a new session, `--continue`, or claude's own resume picker (`--resume` without an id; type an id in the box below it to resume that one). |
-| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Sessions of the repository's other checkouts (its git worktrees, including Claude's `.claude/worktrees/*`, and the main checkout when you are in a worktree) are listed too, marked `· ⎇ <worktree>`, and are resumed from that worktree's directory (the preview says `runs in <worktree>`). Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
+| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Sessions of the repository's other checkouts (its git worktrees, including Claude's `.claude/worktrees/*`, and the main checkout when you are in a worktree) are listed too, marked `· ⎇ <worktree>`, and are resumed from that worktree's directory (the preview says `runs in <worktree>`). The same goes for a session that was moved into a worktree (`claude -w <name> --resume <id>`) or that left one: Claude keeps such a transcript with the main checkout, and once the session leaves the worktree a plain resume starts in the main checkout. cm reads the last worktree Claude recorded for the session (or, failing that, the directory it last ran in) and, while that worktree still exists, resumes it there, so picking it takes you back into the worktree. Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
 | **Fork** | adds `--fork-session`: Claude continues the chosen conversation under a new session id and leaves the original as it was. Enabled when a session id is chosen (Recent or typed) and with Continue. |
 | **Name** | always visible; passed as `--name <name>` (shown in Claude's prompt box, `/resume` picker and terminal title). |
 
@@ -377,6 +379,25 @@ cm never creates, deletes or resets a worktree itself: it only passes the flags 
 * Inferred, not run: the order of the reset checks above and what git does with `-B`; that the inner tmux Claude sees cm's environment only when tmux starts a new server.
 
 **cmux restore.** cmux restores a session by replaying the original command plus `--resume <id>`, so a session started with `-w <name>` comes back with `-w <name>`. Usually that is harmless: the worktree still exists and is reused (only reset when it is clean and fully upstream, which loses nothing). Two cases can differ, and cm can't change the replayed command: if the worktree directory was removed but its branch kept, the replay recreates it with `-B` and resets that branch (see [Limitations](#limitations)); and with `--tmux`, an open tmux session for that worktree is attached to as it is. A fork that is restored may fork once more (see Limitations).
+
+## Keep awake (macOS)
+
+**Keep awake** keeps the Mac awake for exactly as long as the Claude session runs, chosen per launch. It is **macOS only**: on Linux the box isn't shown, `--awake` isn't listed in `--help`, and if it is passed anyway cm prints `--awake is macOS only; ignored` and launches as usual. A value saved by a Mac in a profile or in the last selection stays in the file but is ignored there.
+
+| choice | runs | effect while Claude runs |
+|---|---|---|
+| **Off** (default) | nothing | the Mac sleeps as it normally would |
+| **System (-ims)** | `caffeinate -ims -w <claude pid>` | no idle sleep (`-i`), no disk idle sleep (`-m`), no system sleep (`-s`, honoured **on AC power only**; ignored on battery). The display can still turn off and lock. |
+| **System + display (-dims)** | `caffeinate -dims -w <claude pid>` | the same, and the display stays on (`-d`) |
+
+From the command line: `--awake off|ims|dims`. Like `--name` it isn't a selection flag, so `cm --awake ims` alone opens the screen with it chosen, and it works headless together with selection flags (`cm --mcp github --awake ims`). It is stored in profiles and remembered as part of the [last selection](#last-selection-per-project), because it is a launch preference rather than something risky.
+
+* **How long.** Right after `claude` starts, cm starts `/usr/bin/caffeinate -<flags> -w <claude pid>` (an argv, no shell), detached from the terminal (its own session, no stdin/stdout/stderr), so Ctrl+C in Claude never reaches it. `-w` makes it exit by itself when Claude exits; cm also stops it when it returns, on every path: a normal or non-zero exit, Ctrl+C, a forwarded SIGTERM/SIGHUP, or an error. If cm itself is killed outright, `-w` still ends it with Claude.
+* **The preview** shows `Keep awake: caffeinate -ims -w <claude pid> (ends with claude)`. When the Mac is running on battery (read once at startup with the read-only `pmset -g batt`, off the screen's thread) it adds: *on battery: keeps the Mac awake and drains the battery faster; -s only applies on AC power*.
+* **The lid.** Closing the lid still puts the Mac to sleep, whatever caffeinate says, unless it is in clamshell mode (on power with an external display connected).
+* **cmux restore.** caffeinate isn't part of Claude's command line, so a session restored by cmux runs without it. Start it with cm again if you need it.
+* **If caffeinate can't start** (missing, or the process can't be created), cm warns once after Claude exits, so the message doesn't land in Claude's screen, and the launch goes ahead normally.
+* **Power settings are never changed.** cm never runs `pmset` with arguments that change anything (only `pmset -g batt`, to read the power source) and never uses `sudo`. caffeinate's assertions disappear when it exits. Claude Code already holds short `caffeinate -i -t 300` assertions while it is actively working; this option also covers the waits in between, disk sleep and system sleep.
 
 ## claude.ai connectors
 
@@ -477,6 +498,7 @@ claude [--strict-mcp-config] [--mcp-config=~/.claude-launcher/sessions/<id>/mcp.
 * On every launch cm deletes session directories unused for more than `session_retention_days` (default 60). This is best effort and never fails a launch. It only removes entries of `sessions/` that are named like a session id, are real directories owned by you and contain nothing but cm's two files. It never follows symlinks, and leaves everything else alone. It runs under an exclusive lock on `sessions/.lock` and is skipped while another cm is creating or reusing a directory (which holds a shared lock), so it never deletes files a starting session is about to use. A launch waits at most about 2 seconds for that shared lock and then goes on without it, so a stuck cm can't block other launches. Restoring a session whose files were cleaned up fails with `MCP config file not found`, as before; start it again with cm.
 * If the session files can't be written there (a read-only or foreign-owned `sessions/`), cm warns `session files won't survive a cmux restore: <reason>` and falls back to a private temporary directory that is deleted when Claude exits. When the directory belongs to another user (typically after running cm with `sudo`), the message says which `chown` or `rm` fixes it.
 * `cm --measure` and `scripts/smoke_verify.py` still use throwaway temporary directories.
+* With [Keep awake](#keep-awake-macos) (macOS), `caffeinate -<flags> -w <claude pid>` is started right after Claude, detached from the terminal, and stopped again on every exit path; it is not part of Claude's command line.
 * The command is an argv list; no shell is involved. cm waits as the parent process: Ctrl+C and Ctrl+\ reach Claude through the terminal, SIGTERM and SIGHUP are forwarded, and Claude's exit code is passed through (128+N for a signal).
 * `--mcp-config` is always passed as a single `--mcp-config=<path>` token, and `--resume` with no id is placed last, so neither can swallow a forwarded argument. `--fork-session` and `--name <name>` go just before it; the name is one argv element, however it is spelled.
 
@@ -535,7 +557,7 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 * So **use `${VAR}` references for secrets** in server files (`"Authorization": "Bearer ${GITHUB_PAT}"`). A literal secret in a server's `env` or `headers` has to reach Claude, so it is copied into the session file and stays there until the directory is cleaned up.
 * The cmux-cua token only ever goes into Claude's environment, never into argv or a file. The session file's `/bin/sh` shim only names the variables and reads the token file when the server starts.
 * On a cmux restore, cmux replays only the command line. The environment cm set is **not** replayed: `CMUX_CUA_SOCKET_AUTH_TOKEN`, `CMUX_COMPUTER_USE_MCP_DISABLED=1`, `CMUX_CLAUDE_PID` and `CM_CUA_SESSION`. The token is recovered by the shim from `$CMUX_CUA_AUTH_TOKEN_FILE`, which cmux sets in its terminals. In deny-list mode (no `--strict-mcp-config`) the wrapper also injects its own `cmux-cua`, so a restored session can have two definitions with that name; which one Claude Code uses is unverified (both point at the same client and socket). If you didn't select cmux, `deniedMcpServers` blocks the name anyway.
-* cm writes only to its config home (including `sessions/`) and, for `cm --measure`, temporary directories, plus, if you agree during `cm setup agentmemory`, the npm global install and one launchd/systemd user unit. It never changes your shell profile, `~/.claude.json`, `~/.claude/settings.json`, AgentMemory data or session transcripts. It *reads* this project's transcripts (`~/.claude/projects/<project>/*.jsonl`) for the Recent list, read-only and bounded, and shows only session names, ids and times from them (see [Sessions](#sessions-recent-fork-name)). Note that uv's official installer, which `install.sh` runs only when uv is missing, adds uv to your shell PATH.
+* cm writes only to its config home (including `sessions/`) and, for `cm --measure`, temporary directories, plus, if you agree during `cm setup agentmemory`, the npm global install and one launchd/systemd user unit. It never changes your shell profile, `~/.claude.json`, `~/.claude/settings.json`, AgentMemory data, session transcripts or power settings ([Keep awake](#keep-awake-macos) only runs `caffeinate` for the session and reads `pmset -g batt`). It *reads* this project's transcripts (`~/.claude/projects/<project>/*.jsonl`) for the Recent list, read-only and bounded, and shows only session names, ids and times from them (see [Sessions](#sessions-recent-fork-name)). Note that uv's official installer, which `install.sh` runs only when uv is missing, adds uv to your shell PATH.
 
 ## Troubleshooting
 
@@ -557,6 +579,7 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 
 * Connector selection relies on the deny list whenever a connector is ticked (see [claude.ai connectors](#claudeai-connectors)).
 * cmux computer-use **calls** need cmux's helper and auth token. cm only makes the tools available.
+* A cmux restore doesn't restart [Keep awake](#keep-awake-macos)'s caffeinate (it isn't part of Claude's command line), and a closed lid still sleeps the Mac outside clamshell mode.
 * A cmux restore replays the command line but not the environment cm set (see [Security](#security)), and it fails once the session's files have been cleaned up after `session_retention_days` without use.
 * The Recent list depends on Claude Code's undocumented transcript format (verified on 2.1.281). A future format change makes it say `unavailable` rather than break cm, but it may then list nothing until cm is updated.
 * A cmux restore replays the original command line. For a session started as a fork that line contains `--fork-session`; whether cmux drops it when it adds its own `--resume <id>` is up to cmux and not verified, so a restore could fork once more.

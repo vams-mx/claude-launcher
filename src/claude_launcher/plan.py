@@ -39,6 +39,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import awake as awake_mod
 from . import cmux as cmux_mod
 from . import sessions as sessions_mod
 from . import worktree as wt_mod
@@ -64,6 +65,9 @@ class Selection:
     worktree: str | None = None  # -w <name>: start in a new (or that) git worktree; None = off
     tmux: bool = False  # --tmux (only together with -w)
     launch_dir: str | None = None  # start claude here instead of the catalog's cwd (a worktree's session)
+    # keep the Mac awake while claude runs: "off" | "ims" | "dims" (awake.py; macOS only, ignored elsewhere).
+    # A launch preference like the model: stored in profiles and the remembered last selection.
+    awake: str = "off"
     extra_args: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -169,6 +173,8 @@ def build_plan(
         raise PlanError(f"unknown permissions {sel.permissions!r}")
     if sel.session not in SESSIONS:
         raise PlanError(f"unknown session mode {sel.session!r}")
+    if sel.awake not in awake_mod.MODES:
+        raise PlanError(f"unknown keep-awake mode {sel.awake!r} (choose from {', '.join(awake_mod.MODES)})")
     if sel.fork and not can_fork(sel):
         raise PlanError("fork needs a session to fork: a session id (--resume <id>) or --continue")
     display_name = session_name(sel)  # not `name`: the server loops below reuse that word

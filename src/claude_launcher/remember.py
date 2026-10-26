@@ -8,8 +8,8 @@ the file (for `cm --where` and debugging). The project is the git repository
 the working directory belongs to, else the working directory itself
 (`project_root`, which never runs git).
 
-Only reusable preferences are kept: local MCPs, connectors, plugins, cmux and
-the model. Permissions are always stored (and read back) as "standard", and
+Only reusable preferences are kept: local MCPs, connectors, plugins, cmux, the
+model and keep awake (macOS; kept but ignored elsewhere). Permissions are always stored (and read back) as "standard", and
 the session mode, resume id, fork flag and session name are never stored.
 
 The file is written only after a launch from the screen actually started
@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import awake as awake_mod
 from .paths import config_dir, home, tilde
 from .plan import MODELS, Selection
 from .worktree import gitdir_of as _gitdir_of
@@ -130,9 +131,12 @@ def _parse(doc: Any, root: Path) -> tuple[Selection, str | None, list[str]]:
     if model not in MODELS:
         notes.append(f"model {model!r} is unknown; using Default")
         model = "default"
+    awake, note = awake_mod.normalize(s.get("awake", "off"))
+    if note:
+        notes.append(note)
     saved_at = doc.get("saved_at") if isinstance(doc.get("saved_at"), str) else None
     # permissions, session mode, resume id, fork and name are never taken from the file
-    return Selection(**out, cmux=cmux, model=model), saved_at, notes
+    return Selection(**out, cmux=cmux, model=model, awake=awake), saved_at, notes
 
 
 def load(cwd: Path) -> tuple[Entry | None, list[str]]:
@@ -174,7 +178,7 @@ def to_doc(root: Path, sel: Selection) -> dict[str, Any]:
         "saved_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "selection": {
             "local": list(sel.local), "connectors": list(sel.connectors), "plugins": list(sel.plugins),
-            "cmux": bool(sel.cmux), "model": sel.model,
+            "cmux": bool(sel.cmux), "model": sel.model, "awake": sel.awake,
             "permissions": "standard",  # never "skip", whatever the launch used
         },
     }

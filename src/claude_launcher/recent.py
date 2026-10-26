@@ -49,7 +49,7 @@ MAX_LIMIT = 50
 KEY_MAX = 200  # Claude cuts project keys longer than this and appends a hash
 TAIL_FIRST = 64 * 1024  # first tail window
 TAIL_MAX = 1024 * 1024  # second (last) tail window, when the first had no custom title
-HEAD = 64 * 1024  # head window: first prompt, and a conversation record when the tail had none
+HEAD = 64 * 1024  # head window: first prompt, a conversation record, the worktree a session entered
 SIDECAR_MAX = 64 * 1024
 SCAN_SLACK = 40  # extra files looked at beyond `limit` (skipped files, mtime vs. activity order)
 PROMPT_CHARS = 60
@@ -75,6 +75,14 @@ class RecentSession:
     # has to be started in to resume it. None for the current directory's own sessions.
     worktree: str | None = None
     cwd: str | None = None
+    # The directory the conversation last ran in (`cwd` of its last record). A session started in
+    # the main checkout and moved into a worktree (`claude -w … --resume`) keeps its transcript here
+    # but now lives in that worktree. Internal: never shown or exported.
+    last_cwd: str | None = None
+    # The last worktree Claude recorded for it (`worktree-state` -> `worktreeSession.worktreePath`),
+    # kept even after the session left the worktree (Claude then records `worktreeSession: null`,
+    # and a plain resume starts in the main checkout). Internal, like last_cwd.
+    worktree_path: str | None = None
 
     @property
     def custom(self) -> bool:
@@ -235,12 +243,20 @@ class _Scan:
         self.main = False  # a real prompt or an assistant reply outside sidechains
         self.side = False
         self.known = False
+        self.last_cwd: str | None = None  # `cwd` of the last main-conversation record in the window
+        self.worktree_path: str | None = None  # last non-null worktreeSession.worktreePath in the window
 
     def feed(self, recs: list[dict[str, Any]]) -> None:
         """Records in file order: later titles win, the first prompt is kept."""
         for rec in recs:
             t = rec["type"]
             self.known = self.known or t in _KNOWN
+            if t == "worktree-state":
+                ws = rec.get("worktreeSession")
+                if isinstance(ws, dict) and isinstance(ws.get("worktreePath"), str) and ws["worktreePath"]:
+                    self.worktree_path = ws["worktreePath"]
+            if t in _CONVERSATION and rec.get("isSidechain") is not True and isinstance(rec.get("cwd"), str):
+                self.last_cwd = rec["cwd"]
             if t in _CONVERSATION and rec.get("isSidechain") is True:
                 self.side = True
             elif t == "assistant":
@@ -269,7 +285,7 @@ def _read_sidecar(path: Path) -> str | None:
     return v.strip() if isinstance(v, str) and v.strip() else None
 
 
-def read_session(path: Path) -> RecentSession | str:
+def read_session(path: Path, *, want_worktree: bool = False) -> RecentSession | str:
     """One transcript -> a RecentSession, or why it was skipped:
     "empty", "sidechain", "unreadable", "unknown" (no record cm understands)."""
     sid = path.stem
@@ -290,7 +306,8 @@ def read_session(path: Path) -> RecentSession | str:
                     break
             whole = n == size
             head = _Scan()
-            if not whole and (tail.custom is None or not tail.main or not (tail.custom or tail.ai)):
+            if not whole and (tail.custom is None or not tail.main or not (tail.custom or tail.ai)
+                              or (want_worktree and tail.worktree_path is None)):
                 fh.seek(0)
                 head.feed(_records(fh.read(min(HEAD, size - n)), partial_last=True))
     except OSError:
@@ -315,7 +332,9 @@ def read_session(path: Path) -> RecentSession | str:
     else:
         name, source = f"session {sid[:8]}", "none"
     when = tail.last_ts or head.last_ts or datetime.fromtimestamp(st.st_mtime, timezone.utc)
-    return RecentSession(id=sid, name=name, source=source, last_activity=when)
+    return RecentSession(id=sid, name=name, source=source, last_activity=when,
+                         last_cwd=tail.last_cwd or head.last_cwd,
+                         worktree_path=tail.worktree_path or head.worktree_path)
 
 
 @dataclass(frozen=True)
@@ -364,8 +383,29 @@ def _candidates(srcs: Iterable[_Source]) -> list[tuple[float, Path, _Source]]:
     return out
 
 
-def _tag(s: RecentSession, src: _Source) -> RecentSession:
-    return replace(s, worktree=src.worktree, cwd=src.cwd) if src.worktree else s
+def _tag(s: RecentSession, src: _Source, checkouts: list[wt_mod.Checkout] | None = None) -> RecentSession:
+    """Mark a session of another checkout. A session stored with this directory's transcripts but
+    last run inside another checkout of the same repository (moved there with `claude -w …
+    --resume`) is marked and resumed from that checkout too, so cm takes you back where it was."""
+    if src.worktree:
+        return replace(s, worktree=src.worktree, cwd=src.cwd)
+    if not checkouts:
+        return s
+    # the worktree Claude last recorded (still there, same repository) wins over the last cwd,
+    # which points at the main checkout once the session has left the worktree
+    for hint in (s.worktree_path, s.last_cwd):
+        if not hint:
+            continue
+        last = Path(os.path.realpath(hint))
+        for co in checkouts:
+            root = Path(os.path.realpath(co.path))
+            if last == root or root in last.parents:
+                return replace(s, worktree=co.label, cwd=str(co.path))
+    return s
+
+
+def _checkouts(cwd: str | os.PathLike[str], worktrees: bool) -> list[wt_mod.Checkout]:
+    return wt_mod.other_checkouts(Path(cwd)) if worktrees else []
 
 
 def list_recent(cwd: str | os.PathLike[str], limit: int = DEFAULT_LIMIT, *, worktrees: bool = True) -> Recent:
@@ -381,10 +421,13 @@ def list_recent(cwd: str | os.PathLike[str], limit: int = DEFAULT_LIMIT, *, work
         found: dict[str, RecentSession] = {}
         skipped: dict[str, int] = {}
         files = _candidates(srcs)
+        checkouts = _checkouts(cwd, worktrees)
         for _, path, src in files[: limit + SCAN_SLACK]:
-            r = read_session(path)
+            # the head (where Claude records entering a worktree) only matters when there are other
+            # checkouts to resume into
+            r = read_session(path, want_worktree=bool(checkouts))
             if isinstance(r, RecentSession):
-                r = _tag(r, src)
+                r = _tag(r, src, checkouts)
                 old = found.get(r.id)  # the same id in two checkouts: the newer copy wins
                 if old is None or r.last_activity > old.last_activity:
                     found[r.id] = r
@@ -411,11 +454,12 @@ def find(cwd: str | os.PathLike[str], session_id: str, *, worktrees: bool = True
     if not ID_RE.match(session_id or ""):
         return None
     try:
+        checkouts = _checkouts(cwd, worktrees)
         for src in sources(cwd, worktrees):
             p = src.dir / f"{session_id}.jsonl"
             if p.is_file() and not p.is_symlink():
-                r = read_session(p)
-                return _tag(r, src) if isinstance(r, RecentSession) else None
+                r = read_session(p, want_worktree=bool(checkouts))
+                return _tag(r, src, checkouts) if isinstance(r, RecentSession) else None
     except Exception:  # noqa: BLE001
         return None
     return None
