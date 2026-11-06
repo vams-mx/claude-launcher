@@ -14,6 +14,11 @@ Sources (never written to):
     `claudeAiMcpEverConnected` names in ~/.claude.json.
   * plugins: `enabledPlugins` in user/project/local settings, installed per
     ~/.claude/plugins/installed_plugins.json.
+  * agents (for --agent): ~/.claude/agents/*.md, <project>/.claude/agents/*.md
+    (the cwd's too), and <installPath>/agents/*.md of every installed plugin
+    (named "<plugin>:<agent>"); the `agent` setting of user/project/local
+    settings is the default. Frontmatter `name` / `description`.
+  * skill packs: ~/.claude-launcher/skills/* (skillpacks.py).
   * cmux computer-use: see cmux.py.
 
 Server definitions are copied verbatim; nothing is invented.
@@ -34,6 +39,8 @@ from typing import Any, Callable
 
 from . import cmux as cmux_mod
 from . import config as cfg_mod
+from . import frontmatter
+from . import skillpacks
 from .paths import claude_dir, claude_json, config_dir, expand, managed_dir, tilde
 
 CONNECTOR_PREFIX = "claude.ai "
@@ -93,6 +100,7 @@ class Plugin:
     enabled_in: list[str] = field(default_factory=list)  # settings scopes with true
     install_path: Path | None = None
     mcp_servers: list[str] = field(default_factory=list)  # plugin:<name>:<server>
+    installed_here: bool = True  # installed for the user, or for this project (project/local scope)
 
     @property
     def name(self) -> str:
@@ -101,6 +109,20 @@ class Plugin:
     @property
     def key(self) -> str:
         return f"plugin:{self.id}"
+
+
+@dataclass
+class Agent:
+    name: str  # what --agent takes: the agent's name, "<plugin>:<name>" for a plugin's agent
+    description: str = ""
+    source: str = ""  # "user" | "project" | "plugin <id>"
+    path: Path | None = None
+    plugin_id: str | None = None  # the plugin it comes with (it must be enabled for the session)
+    installed_here: bool = True  # (plugin agents) the plugin is installed for this project
+
+    @property
+    def key(self) -> str:
+        return f"agent:{self.name}"
 
 
 @dataclass
@@ -115,6 +137,9 @@ class Catalog:
     source_files: list[Path] = field(default_factory=list)  # explicit `sources` files
     connectors_refreshed_at: str | None = None
     warnings: list[str] = field(default_factory=list)
+    agents: list[Agent] = field(default_factory=list)
+    settings_agent: str | None = None  # the `agent` setting (user/project/local), the Default agent
+    skill_packs: list[skillpacks.SkillPack] = field(default_factory=list)
 
     # -- lookups -------------------------------------------------------------
     def local_by_name(self, name: str) -> LocalServer | None:
@@ -154,6 +179,34 @@ class Catalog:
 
     def plugin(self, pid: str) -> Plugin | None:
         return next((p for p in self.plugins if p.id == pid), None)
+
+    def agent(self, name: str | None) -> Agent | None:
+        return next((a for a in self.agents if a.name == name), None) if name else None
+
+    def agent_block(self, agent: Agent) -> str | None:
+        """Why a plugin's agent can't be used here, or None."""
+        if not agent.plugin_id:
+            return None
+        if not agent.installed_here:
+            return (f"agent {agent.name}: its plugin {agent.plugin_id} is installed for another project only; "
+                    "install it for this one (Ctrl+O, or cm plugins install) or pick another agent")
+        if self.plugin(agent.plugin_id) is None:
+            return (f"agent {agent.name}: its plugin {agent.plugin_id} is installed but not enabled in your "
+                    f"settings, so cm can't load it (claude plugin enable {agent.plugin_id})")
+        return None
+
+    def skill_pack(self, name: str) -> skillpacks.SkillPack | None:
+        return next((p for p in self.skill_packs if p.name == name), None)
+
+    def resolve_skill_packs(self, names: list[str]) -> tuple[list[str], list[str]]:
+        found, missing = [], []
+        for n in names:
+            hit = self.skill_pack(n) or self.skill_pack(n.lower())
+            if hit is None:
+                missing.append(n)
+            elif hit.name not in found:
+                found.append(hit.name)
+        return found, missing
 
     def all_server_names(self) -> set[str]:
         names = {s.name for s in self.local} | {c.name for c in self.connectors}
@@ -338,7 +391,8 @@ def discover_connectors(warnings: list[str]) -> tuple[list[Connector], str | Non
     return ordered, cache.get("refreshed_at")
 
 
-def discover_plugins(cwd: Path, warnings: list[str]) -> list[Plugin]:
+def _settings_files(cwd: Path) -> list[tuple[str, Path]]:
+    """user, project and local settings, in increasing precedence (the cwd's after the root's)."""
     root = _project_root(cwd)
     sources = [
         ("user", claude_dir() / "settings.json"),
@@ -347,9 +401,32 @@ def discover_plugins(cwd: Path, warnings: list[str]) -> list[Plugin]:
     ]
     if root != cwd:
         sources += [("project", cwd / ".claude" / "settings.json"), ("local", cwd / ".claude" / "settings.local.json")]
+    return sources
+
+
+def installed_plugins(warnings: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """~/.claude/plugins/installed_plugins.json: {plugin id: [install entries]} (odd entries dropped)."""
+    doc = _read_json(claude_dir() / "plugins" / "installed_plugins.json", warnings)
+    raw = doc.get("plugins") if isinstance(doc, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {pid: [e for e in v if isinstance(e, dict)] for pid, v in raw.items()
+            if isinstance(pid, str) and isinstance(v, list)}
+
+
+def entry_here(entries: list[dict[str, Any]], cwd: Path) -> dict[str, Any] | None:
+    """The install entry that applies to `cwd`: user scope, or project/local scope of this project."""
+    root = _project_root(cwd)
+    for e in entries:
+        if e.get("scope") == "user" or e.get("projectPath") in (str(cwd), str(root)):
+            return e
+    return None
+
+
+def discover_plugins(cwd: Path, warnings: list[str]) -> list[Plugin]:
     state: dict[str, list[str]] = {}
     final: dict[str, bool] = {}
-    for scope, f in sources:
+    for scope, f in _settings_files(cwd):
         doc = _read_json(f, warnings) or {}
         ep = doc.get("enabledPlugins") if isinstance(doc, dict) else None
         if not isinstance(ep, dict):
@@ -358,22 +435,83 @@ def discover_plugins(cwd: Path, warnings: list[str]) -> list[Plugin]:
             final[pid] = bool(on)
             if on:
                 state.setdefault(pid, []).append(scope)
-    installed = (_read_json(claude_dir() / "plugins" / "installed_plugins.json", warnings) or {}).get("plugins") or {}
+    installed = installed_plugins(warnings)
     plugins: list[Plugin] = []
     for pid, on in final.items():
         if not on:
             continue
         entries = installed.get(pid) or []
+        here = entry_here(entries, cwd)
         path = None
-        for e in entries:
-            pp = e.get("projectPath")
-            if e.get("scope") == "user" or pp in (str(cwd), str(root)):
-                path = Path(e["installPath"]) if e.get("installPath") else None
-                break
-        if path is None and entries and entries[0].get("installPath"):
+        if here is not None:
+            path = Path(here["installPath"]) if isinstance(here.get("installPath"), str) else None
+        if path is None and entries and isinstance(entries[0].get("installPath"), str):
             path = Path(entries[0]["installPath"])
-        plugins.append(Plugin(pid, state.get(pid, []), path, _plugin_mcp_servers(pid, path)))
+        plugins.append(Plugin(pid, state.get(pid, []), path, _plugin_mcp_servers(pid, path),
+                              installed_here=here is not None or not entries))
     return sorted(plugins, key=lambda p: p.id)
+
+
+MAX_AGENTS = 200  # agent files read per folder
+
+
+def _agent_files(d: Path) -> list[Path]:
+    try:
+        entries = sorted(os.scandir(d), key=lambda e: e.name)
+    except OSError:
+        return []
+    out = []
+    for e in entries:
+        if not e.name.endswith(".md") or e.name.startswith("."):
+            continue
+        try:
+            if Path(e.path).is_file():
+                out.append(Path(e.path))
+        except OSError:
+            continue
+        if len(out) >= MAX_AGENTS:
+            break
+    return out
+
+
+def _agent(path: Path, source: str, prefix: str = "", plugin_id: str | None = None,
+           installed_here: bool = True) -> Agent | None:
+    fm = frontmatter.read(path)
+    name = (fm.get("name") or "").strip() or path.stem
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
+        return None  # not something --agent could name
+    desc = " ".join((fm.get("description") or "").split())
+    return Agent(prefix + name, desc, source, path, plugin_id, installed_here)
+
+
+def discover_agents(cwd: Path, warnings: list[str] | None = None) -> tuple[list[Agent], str | None]:
+    """Agents --agent can name, highest precedence first (a project's agent shadows a user one of
+    the same name; plugin agents are namespaced), and the `agent` setting."""
+    root = _project_root(cwd)
+    agents: dict[str, Agent] = {}
+    folders = [(d / ".claude" / "agents", "project") for d in dict.fromkeys([cwd, root])]
+    folders.append((claude_dir() / "agents", "user"))
+    for folder, source in folders:
+        for f in _agent_files(folder):
+            if (a := _agent(f, source)) and a.name not in agents:
+                agents[a.name] = a
+    for pid, entries in sorted(installed_plugins(warnings).items()):
+        here = entry_here(entries, cwd)
+        e = here or (entries[0] if entries else None)
+        if not e or not isinstance(e.get("installPath"), str):
+            continue
+        plugin_name = pid.split("@", 1)[0]
+        for f in _agent_files(Path(e["installPath"]) / "agents"):
+            a = _agent(f, f"plugin {pid}", f"{plugin_name}:", pid, here is not None)
+            if a and a.name not in agents:
+                agents[a.name] = a
+    setting: str | None = None
+    for _scope, f in _settings_files(cwd):
+        doc = _read_json(f) or {}
+        v = doc.get("agent") if isinstance(doc, dict) else None
+        if isinstance(v, str) and v.strip():
+            setting = v.strip()
+    return list(agents.values()), setting
 
 
 def _plugin_mcp_servers(pid: str, path: Path | None) -> list[str]:
@@ -406,6 +544,8 @@ def discover(cwd: Path | None = None, env: dict[str, str] | None = None) -> Cata
     cat.mcp_folders, cat.source_files = scanned.get("folders", []), scanned.get("sources", [])
     cat.connectors, cat.connectors_refreshed_at = discover_connectors(cat.warnings)
     cat.plugins = discover_plugins(cwd, cat.warnings)
+    cat.agents, cat.settings_agent = discover_agents(cwd)
+    cat.skill_packs = skillpacks.discover(cat.warnings)
     cat.cmux = cmux_mod.probe(env)
     if _sideload_disabled():
         cat.warnings.append("managed policy sets disableSideloadFlags: Claude will refuse --mcp-config launches")

@@ -463,3 +463,134 @@ def find(cwd: str | os.PathLike[str], session_id: str, *, worktrees: bool = True
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def _norm_name(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def find_by_name(cwd: str | os.PathLike[str], name: str, *, limit: int = MAX_LIMIT,
+                 worktrees: bool = True) -> RecentSession | None:
+    """The most recent session of this project (or, with `worktrees`, of another checkout of its
+    repository) whose custom name (/rename or --name) is `name`, compared trimmed and
+    case-insensitively. Only custom names count (an AI title or a first prompt is not a name you
+    gave), and only among the `limit` most recent sessions. None if there is none. Never raises."""
+    want = _norm_name(name or "")
+    if not want:
+        return None
+    res = list_recent(cwd, limit, worktrees=worktrees)
+    for s in res.sessions:  # newest activity first
+        if s.custom and _norm_name(s.name) == want:
+            return s
+    return None
+
+
+# ---------------------------------------------------------------------------
+# the session a launch created: a before/after diff of the transcript files
+
+MAX_SNAPSHOT_FILES = 20000  # per project directory; beyond that the diff gives up (no guessing)
+
+
+@dataclass
+class Snapshot:
+    """Which transcript files existed, per project directory, before a launch. Directories that
+    didn't exist yet are recorded as empty (a new project, or a worktree claude -w creates)."""
+    files: dict[Path, set[str]] = field(default_factory=dict)
+    places: list[str] = field(default_factory=list)  # the directories it was taken for
+    complete: bool = True  # False when a directory was too large or unreadable
+
+
+def _dirs_for(places: Iterable[str | os.PathLike[str]]) -> dict[Path, _Source]:
+    """The project directories of exactly these places (existing or not yet): where this launch's
+    session can be written. Not the repository's other checkouts: a session started meanwhile in a
+    sibling worktree must never be taken for this launch's (the -w worktree and a resume's checkout
+    are passed in as places already)."""
+    out: dict[Path, _Source] = {}
+    for c in places:
+        for v in dict.fromkeys([str(c), os.path.realpath(c)]):
+            out.setdefault(projects_root() / project_key(v), _Source(projects_root() / project_key(v)))
+    return out
+
+
+def _transcripts(d: Path) -> set[str] | None:
+    """Top-level session transcript names (the same rule as the Recent list), or None when the
+    directory is too large or can't be read. A missing directory has none."""
+    try:
+        it = os.scandir(d)
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    out: set[str] = set()
+    with it:
+        for n, e in enumerate(it):
+            if n >= MAX_SNAPSHOT_FILES:
+                return None
+            if not e.name.endswith(".jsonl") or e.name.startswith("agent-"):
+                continue
+            if not ID_RE.match(e.name[: -len(".jsonl")]):
+                continue
+            try:
+                if e.is_file(follow_symlinks=False):
+                    out.add(e.name)
+            except OSError:
+                continue
+    return out
+
+
+def snapshot(places: Iterable[str | os.PathLike[str]]) -> Snapshot:
+    """Before a launch. Read-only and bounded (names only, MAX_CHECKOUTS checkouts). Never raises."""
+    places = [str(p) for p in places]
+    snap = Snapshot(places=places)
+    try:
+        for d in _dirs_for(places):
+            names = _transcripts(d)
+            if names is None:
+                snap.complete = False
+                continue
+            snap.files[d] = names
+    except Exception:  # noqa: BLE001
+        snap.complete = False
+    return snap
+
+
+def new_session(before: Snapshot, extra: Iterable[str | os.PathLike[str]] = ()) -> RecentSession | None:
+    """After claude exited: the one session file that appeared since `before` in any of its
+    project directories (or those of `extra` places, e.g. the worktree claude -w created), as a
+    RecentSession (its name and, for another checkout, its directory). None when no file or
+    several appeared, or the snapshot was incomplete: never a guess. Never raises."""
+    if not before.complete:
+        return None
+    try:
+        places = list(dict.fromkeys([*before.places, *map(str, extra)]))
+        dirs = _dirs_for(places)
+        found: list[tuple[Path, _Source]] = []
+        for d, src in dirs.items():
+            names = _transcripts(d)
+            if names is None:
+                return None
+            for n in sorted(names - before.files.get(d, set())):
+                found.append((d / n, src))
+            if len(found) > 1:
+                return None
+        if len(found) != 1:
+            return None
+        path, src = found[0]
+        sid = path.name[: -len(".jsonl")]
+        checkouts = _checkouts(before.places[0], True) if before.places else []
+        r = read_session(path, want_worktree=bool(checkouts))
+        if not isinstance(r, RecentSession):
+            # e.g. nothing said yet: still the session claude created, just without a name
+            r = RecentSession(id=sid, name=f"session {sid[:8]}", source="none",
+                              last_activity=datetime.now(timezone.utc))
+        if src.worktree:
+            return _tag(r, src, checkouts)
+        own = {projects_root() / project_key(v) for p in before.places[:1] for v in (p, os.path.realpath(p))}
+        if path.parent not in own:
+            # a place other than the launch directory (a worktree claude -w created)
+            for p in places:
+                if path.parent in {projects_root() / project_key(v) for v in (p, os.path.realpath(p))}:
+                    return replace(r, cwd=p if os.path.isdir(p) else None)
+        return _tag(r, src, checkouts)
+    except Exception:  # noqa: BLE001 - remembering must never fail a launch
+        return None

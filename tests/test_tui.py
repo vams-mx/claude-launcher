@@ -123,7 +123,7 @@ def test_unavailable_cmux_blocks(catalog):
     drive(app, steps)
 
 
-def test_enter_in_profile_dropdown_selects_instead_of_launching(catalog):
+def test_space_opens_the_profile_dropdown_and_enter_picks_inside_it(catalog):
     from textual.widgets import Select
 
     profiles.save("a", Selection(local=["gdrive"]))
@@ -133,7 +133,7 @@ def test_enter_in_profile_dropdown_selects_instead_of_launching(catalog):
     async def steps(app, pilot):
         sel = app.query_one("#profile", Select)
         sel.focus()
-        await pilot.press("enter")  # closed Select: Enter opens it
+        await pilot.press("space")  # closed Select: Space opens it
         await pilot.pause()
         assert app.return_value is None and sel.expanded
         await pilot.press("down", "down", "enter")  # blank, a, b -> pick "b"
@@ -146,6 +146,25 @@ def test_enter_in_profile_dropdown_selects_instead_of_launching(catalog):
 
     result = drive(app, steps)
     assert result[1].local == ["agentmemory"] and result[1].model == "sonnet"
+
+
+def test_enter_on_the_closed_profile_dropdown_launches(catalog):
+    from textual.widgets import Select
+
+    profiles.save("a", Selection(local=["gdrive"]))
+    app = LauncherApp(catalog, Selection(local=["agentmemory"]), claude_bin="claude")
+
+    async def steps(app, pilot):
+        sel = app.query_one("#profile", Select)
+        sel.focus()
+        await pilot.pause()
+        await pilot.press("enter")  # closed: launches, so the empty-name prompt comes first
+        await pilot.pause()
+        assert app.return_value is None and not sel.expanded and app.focused.id == "name"
+        await pilot.press("enter")  # second Enter: launch unnamed
+
+    result = drive(app, steps)
+    assert result[0] == "launch" and result[1].local == ["agentmemory"]
 
 
 def test_unverified_connector_from_profile_survives_the_screen(catalog):
@@ -385,11 +404,18 @@ def test_arrows_flow_from_box_to_box(catalog):
         assert app.focused.id == "worktree"
         await pilot.press("down")
         await pilot.pause()
+        assert app.focused.id == "agent"  # the Agent box: a closed list passes Down on
+        assert not app.query_one("#agent", Select).expanded
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.focused.id == "extra_args"
+        await pilot.press("down")
+        await pilot.pause()
         assert app.focused.id == "profile"
         await pilot.press("down")  # a closed Select passes Down on; it doesn't open
         await pilot.pause()
         assert not app.query_one("#profile", Select).expanded and app.focused.id == "profile_name"
-        await pilot.press("up", "up", "up", "up")
+        await pilot.press("up", "up", "up", "up", "up", "up")
         await pilot.pause()
         assert app.focused.id == "session"
         assert app.return_value is None

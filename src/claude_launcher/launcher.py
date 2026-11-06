@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterator
 from . import awake as awake_mod
 from . import config as config_mod
 from . import sessions
+from . import skillpacks
 from .catalog import Catalog
 from .paths import tilde
 from .plan import LaunchPlan, PlanError, Selection, build_plan
@@ -162,6 +163,10 @@ def launch(
     on_started: Callable[[], None] | None = None,
 ) -> int:
     plan = build_plan(cat, sel, claude_bin=claude_bin)
+    for name in sel.skill_packs:  # --plugin-dir wants a manifest; cm writes a minimal one if missing
+        pack = cat.skill_pack(name)
+        if pack is not None and (w := skillpacks.ensure_manifest(pack)):
+            print(f"cm: warning: {w}", file=sys.stderr)
     try:
         d = persist_session_files(plan)
     except OSError as exc:

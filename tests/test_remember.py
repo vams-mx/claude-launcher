@@ -184,15 +184,20 @@ def test_file_layout_permissions_and_never_saved_fields(fake_home, screen):
     assert stat.S_IMODE(f.parent.stat().st_mode) == 0o700
     doc = json.loads(f.read_text())
     assert doc["selection"] == {"local": ["gdrive"], "connectors": ["claude.ai Slack"],
-                                "plugins": ["commit-commands@official"], "cmux": True, "model": "opus",
-                                "awake": "dims", "permissions": "standard"}
+                                "plugins": ["commit-commands@official"], "skill_packs": [], "cmux": True,
+                                "model": "opus", "agent": None, "awake": "dims", "extra_args": ["--verbose"],
+                                "permissions": "standard"}
+    # a fork: its id is only known from a transcript that appears while claude runs, and the fake
+    # launch writes none, so no session is stored
+    assert "last_session" not in doc
     assert not [p for p in f.parent.iterdir() if p.name.endswith(".tmp")]  # atomic write left nothing behind
 
     screen.result = None
     assert run() == 0
     sel, _ = screen.opened[-1]
     assert sel.permissions == "standard" and sel.session == "new"
-    assert sel.resume_id is None and sel.fork is False and sel.name is None and sel.extra_args == []
+    assert sel.resume_id is None and sel.fork is False and sel.name is None
+    assert sel.extra_args == ["--verbose"]  # remembered, like the model
     assert sel.cmux and sel.model == "opus" and sel.connectors == ["claude.ai Slack"]
     assert sel.awake == "dims"  # a launch preference, unlike Skip permissions: remembered
 

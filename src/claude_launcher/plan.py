@@ -18,6 +18,11 @@ denylist  At least one claude.ai connector selected (or a selected plugin
           that appears after discovery (e.g. a brand-new connector before
           `cm --refresh`) could slip through, which the UI says.
 
+Agent (`--agent <name>`) and skill packs (`--plugin-dir <pack>` each, session
+only: skillpacks.py) go before the forwarded args; `--resume` stays last. cm
+never passes `--session-id` (a cmux restore appends `--resume <id>`, which
+claude refuses next to it); cli.py finds a new session's id afterwards.
+
 In both modes a single `--settings <session settings.json>` carries
 `enabledPlugins` (every known plugin explicitly true/false), the hooks of
 selected servers' companion settings (e.g. AgentMemory), and the deny list.
@@ -35,6 +40,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,6 +75,11 @@ class Selection:
     # A launch preference like the model: stored in profiles and the remembered last selection.
     awake: str = "off"
     extra_args: list[str] = field(default_factory=list)
+    # --agent <name>: the session's main agent (catalog.Agent); None = claude's default (the `agent`
+    # setting, if any). A preference like the model: stored in profiles and the last selection.
+    agent: str | None = None
+    # skill packs (skillpacks.py) loaded for this session only, one --plugin-dir each
+    skill_packs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -101,6 +112,7 @@ class PlanError(ValueError):
 
 # Per-launch values: never stored in a profile (nor in the remembered last selection).
 LAUNCH_ONLY = ("resume_id", "fork", "name", "worktree", "tmux", "launch_dir")
+AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 def session_name(sel: Selection) -> str | None:
@@ -123,6 +135,28 @@ def passthrough_worktree(args: list[str]) -> bool:
     -w/--worktree, --tmux)."""
     return any(a in ("-w", "--worktree", "--tmux") or a.startswith(("--worktree=", "--tmux="))
                or (a.startswith("-w") and not a.startswith("--")) for a in args)
+
+
+def passthrough_session(args: list[str]) -> bool:
+    """Whether the arguments forwarded after `--` already choose the session: claude's
+    --session-id, -r/--resume or -c/--continue."""
+    return any(a in ("--session-id", "--resume", "-r", "--continue", "-c")
+               or a.startswith(("--session-id=", "--resume=")) for a in args)
+
+
+def passthrough_agent(args: list[str]) -> bool:
+    """Whether the arguments forwarded after `--` already choose the agent (claude's --agent; not
+    --agents, which only defines agents)."""
+    return any(a == "--agent" or a.startswith("--agent=") for a in args)
+
+
+def passthrough_session_mode(args: list[str]) -> bool:
+    """Whether the arguments after `--` resume or continue a session (-r/--resume, -c/--continue)."""
+    return any(a in ("--resume", "-r", "--continue", "-c") or a.startswith("--resume=") for a in args)
+
+
+def passthrough_session_id(args: list[str]) -> bool:
+    return any(a == "--session-id" or a.startswith("--session-id=") for a in args)
 
 
 def can_fork(sel: Selection) -> bool:
@@ -180,6 +214,17 @@ def build_plan(
     display_name = session_name(sel)  # not `name`: the server loops below reuse that word
     if display_name and passthrough_name(sel.extra_args):
         raise PlanError("the session is named twice (--name and a --name/-n after --); keep only one")
+    if sel.session in ("continue", "resume") and passthrough_session_mode(sel.extra_args):
+        raise PlanError("the session is chosen twice (cm's Continue/Resume and a --resume/-r/--continue/-c "
+                        "after --); keep only one")
+    if passthrough_session_id(sel.extra_args) and sel.session in ("continue", "resume") and not sel.fork:
+        raise PlanError("a --session-id after -- works with Continue/Resume only together with Fork "
+                        "(claude's rule)")
+    if sel.agent is not None:
+        if not AGENT_RE.match(sel.agent):
+            raise PlanError(f"invalid agent name {sel.agent!r}")
+        if passthrough_agent(sel.extra_args):
+            raise PlanError("the agent is given twice (cm's Agent and an --agent after --); keep only one")
     if sel.tmux and sel.worktree is None:
         raise PlanError("tmux needs a worktree (claude's --tmux only works with -w)")
     if sel.worktree is not None:
@@ -263,6 +308,24 @@ def build_plan(
     for pid in sel.plugins:
         if pid not in known_plugins:
             raise PlanError(f"unknown plugin {pid!r}")
+    agent = cat.agent(sel.agent) if sel.agent else None
+    if sel.agent and agent is None:
+        warnings.append(f"agent {sel.agent!r} was not found in ~/.claude/agents, the project's .claude/agents "
+                        "or an installed plugin; claude decides whether it exists")
+    if agent is not None and agent.plugin_id:
+        if why := cat.agent_block(agent):
+            raise PlanError(why)
+        if agent.plugin_id not in sel.plugins:
+            raise PlanError(f"agent {agent.name} comes with plugin {agent.plugin_id}: tick that plugin")
+    packs = []
+    for name in sel.skill_packs:
+        pack = cat.skill_pack(name)
+        if pack is None:
+            raise PlanError(f"unknown skill pack {name!r} (see `cm skills list`)")
+        if pack.error:
+            raise PlanError(f"skill pack {name}: {pack.error}")
+        packs.append(pack)
+        warnings += [f"skill pack {name}: {w}" for w in pack.warnings()]
     settings["enabledPlugins"] = {p.id: (p.id in sel.plugins) for p in cat.plugins}
 
     selected_names = list(servers) + list(sel.connectors) + plugin_mcp
@@ -303,6 +366,10 @@ def build_plan(
         argv.append("--dangerously-skip-permissions")
     if sel.session == "continue":
         argv.append("--continue")
+    if sel.agent:
+        argv += ["--agent", sel.agent]
+    for pack in packs:
+        argv += ["--plugin-dir", str(pack.path)]  # session only: nothing is installed
     argv += list(sel.extra_args)
     if sel.fork:
         argv.append("--fork-session")

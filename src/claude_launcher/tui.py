@@ -19,12 +19,40 @@ display (-dims), i.e. `caffeinate -<flags> -w <claude pid>` for as long as
 claude runs (awake.py). Whether the Mac is on battery is read once at startup,
 off the UI thread, for the preview's battery note.
 
+Extra args: the arguments forwarded to claude after `--`, as one editable line
+(shlex syntax). A line that can't be parsed, or one that repeats something cm
+already sets (--name, -w, --tmux, the session), shows in the preview and
+blocks Enter.
+
 Opened without selection flags, the screen starts from the selection last
 launched from it in this project (remember.py; cli.py decides) and says so in
-a note at the top, which Ctrl+N (clear all) or loading a profile hides.
+a note at the top, which Ctrl+N (clear all) or loading a profile hides. When
+that launch's session still exists, Session starts on Resume of it (cli.py
+puts it in the initial selection); Ctrl+N or New starts a new one instead.
+
+Agent (in the Session box): Default (no --agent; the `agent` setting, if
+any, applies and is named) or one of the agents catalog.py found. A plugin's
+agent ticks its plugin (the preview says so); one whose plugin isn't
+installed for this project blocks Enter with the reason.
+
+Skill packs (left, below Plugins): skillpacks.py's packs, one --plugin-dir
+each; a missing required command is shown on the row and warned about in the
+preview, never blocking.
+
+Ctrl+O opens the plugin installer (InstallScreen): the plugins of the
+configured marketplaces (marketplace.py), searchable, installed ones marked,
+a scope, and Install (pressed twice: the first shows the exact command). It
+runs `claude plugin install` off the UI thread and shows what claude printed;
+afterwards the Plugins list and the agents are read again.
+
+Enter launches from everywhere except an open list (where it picks the row)
+and the profile name box (where it saves); Space opens a closed Recent or
+profile list.
 """
 
 from __future__ import annotations
+
+import shlex
 
 from rich.text import Text
 from textual import on, work
@@ -33,19 +61,22 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.timer import Timer
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, Checkbox, Footer, Header, Input, Label, RadioButton, RadioSet, Select, SelectionList, Static,
+    Button, Checkbox, Footer, Header, Input, Label, OptionList, RadioButton, RadioSet, Select, SelectionList, Static,
 )
+from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection as Item
 
 from . import awake as awake_mod
-from . import compat, health, profiles
+from . import compat, health, marketplace, profiles
 from . import config as config_mod
 from . import recent as recent_mod
 from . import themes
 from . import worktree as wt_mod
 from . import costs as costs_mod
-from .catalog import Catalog, Connector, discover_connectors, refresh_connectors
+from .catalog import Agent, Catalog, Connector, Plugin, discover_agents, discover_connectors, discover_plugins
+from .catalog import refresh_connectors
 from .plan import PlanError, Selection, can_fork, passthrough_name, passthrough_worktree
 from .preview import preview_plan, render
 
@@ -54,6 +85,9 @@ PERM_LABELS = {"standard": "Standard (ask before acting)", "skip": "⚠ Skip per
 SESSION_LABELS = {"new": "New session", "continue": "Continue last (--continue)", "resume": "Resume… (native picker)"}
 NAME_NUDGE = "Name this session (Enter again to launch without a name)"
 WT_CONFIRM = "Enter again to launch anyway"
+DEFAULT_AGENT = "\0default"  # the Agent box's "Default" (no --agent)
+HINT = ("↑↓ move through all boxes · Space toggle / open a list · Enter launch · Ctrl+S save profile · "
+        "Ctrl+O install plugins · Ctrl+R refresh connectors · Ctrl+T theme · Esc quit")
 
 def _edge(options: list, last: bool) -> int | None:
     """Index of the first (or last) enabled option, or None if none is enabled."""
@@ -110,12 +144,181 @@ class FlowColumn(VerticalScroll):
 
 
 class FlowSelect(Select):
-    """Up/Down move between boxes; Enter or Space opens the list."""
+    """Up/Down move between boxes; Space opens the list (Enter launches: LauncherApp.action_launch)."""
 
     BINDINGS = [Binding("down", "flow(1)", show=False), Binding("up", "flow(-1)", show=False)]
 
     def action_flow(self, direction: int) -> None:
         self.app.flow_focus(direction)
+
+
+SCOPE_LABELS = {"user": "User (all your projects)", "project": "Project (shared: .claude/settings.json)",
+                "local": "Local (this project, only you)"}
+
+
+class InstallScreen(ModalScreen[bool]):
+    """Install a plugin from a configured marketplace (marketplace.py). Dismissed with True when
+    something was installed (the caller then reads the plugins again)."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+    DEFAULT_CSS = """
+    InstallScreen { align: center middle; }
+    #install_box { width: 90%; height: 90%; border: round $accent; background: $surface; padding: 0 1; }
+    #install_list { height: 1fr; border: round $panel; }
+    #install_list:focus { border: round $accent; }
+    #install_scope { width: 100%; }
+    #install_buttons { height: auto; }
+    #install_buttons Button { margin-right: 1; }
+    #install_out { height: auto; max-height: 12; overflow-y: auto; border: round $panel; padding: 0 1; }
+    """
+
+    def __init__(self, cwd, claude_bin: str) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self.claude_bin = claude_bin
+        self.items: list[marketplace.Available] = []
+        self.shown: list[marketplace.Available] = []
+        self.armed: tuple[str, str] | None = None  # (plugin id, scope) a first Install press showed
+        self.installed = False
+        self.busy = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="install_box"):
+            yield Label("Install a plugin from your marketplaces (claude plugin install)", classes="group")
+            yield Input(placeholder="search: name, marketplace, description…", id="install_search")
+            yield OptionList(id="install_list")
+            with RadioSet(id="install_scope"):
+                for k, v in SCOPE_LABELS.items():
+                    yield RadioButton(v, value=k == "user", name=k)
+            with Horizontal(id="install_buttons"):
+                yield Button("Install…", id="install_go", variant="primary")
+                yield Button("Close", id="install_close")
+            yield Static("reading the marketplaces…", id="install_out")
+
+    def on_mount(self) -> None:
+        self.query_one("#install_search", Input).focus()
+        self._load()
+
+    @work(thread=True, exclusive=True, group="marketplaces")
+    def _load(self) -> None:
+        warnings: list[str] = []
+        items = marketplace.available(self.cwd, warnings)  # read-only file I/O, off the UI thread
+        self.app.call_from_thread(self._loaded, items, warnings)
+
+    def _loaded(self, items: list[marketplace.Available], warnings: list[str]) -> None:
+        self.items = items
+        self._filter(self.query_one("#install_search", Input).value)
+        n_m = len({x.marketplace for x in items})
+        msg = f"{len(items)} plugins in {n_m} marketplace(s). Pick one, choose a scope, press Install twice."
+        if not items:
+            msg = "no plugins found: add a marketplace first (claude plugin marketplace add …)"
+        self._out(Text(msg + "".join(f"\n• {w}" for w in warnings), style="dim"))
+
+    def _row(self, x: marketplace.Available) -> Text:
+        t = Text(x.name, style="bold")
+        t.append(f"  @{x.marketplace}", style="dim")
+        if x.installed:
+            t.append(f"  ✓ installed: {', '.join(x.installed)}", style="green")
+        if x.description:
+            t.append(f"  {recent_mod.shorten(x.description, 70)}", style="dim italic")
+        return t
+
+    def _filter(self, query: str) -> None:
+        self.shown = [x for x in self.items if x.matches(query)]
+        ol = self.query_one("#install_list", OptionList)
+        ol.clear_options()
+        ol.add_options([Option(self._row(x), id=x.id) for x in self.shown])
+        if self.shown:
+            ol.highlighted = 0
+        self._disarm()
+
+    def _out(self, text: Text | str) -> None:
+        self.query_one("#install_out", Static).update(text)
+
+    def _chosen(self) -> marketplace.Available | None:
+        ol = self.query_one("#install_list", OptionList)
+        i = ol.highlighted
+        return self.shown[i] if i is not None and 0 <= i < len(self.shown) else None
+
+    def _scope(self) -> str:
+        btn = self.query_one("#install_scope", RadioSet).pressed_button
+        return btn.name if btn and btn.name else "user"
+
+    def _disarm(self) -> None:
+        self.armed = None
+        if not self.busy:
+            self.query_one("#install_go", Button).label = "Install…"
+
+    @on(Input.Changed, "#install_search")
+    def _search(self, event: Input.Changed) -> None:
+        self._filter(event.value)
+
+    @on(Input.Submitted, "#install_search")
+    def _to_list(self) -> None:
+        self.query_one("#install_list", OptionList).focus()
+
+    @on(OptionList.OptionHighlighted)
+    @on(RadioSet.Changed, "#install_scope")
+    def _changed(self) -> None:
+        self._disarm()
+
+    @on(OptionList.OptionSelected)
+    def _picked(self) -> None:
+        self._press_install()
+
+    @on(Button.Pressed, "#install_go")
+    def _press_install(self) -> None:
+        if self.busy:
+            return
+        x = self._chosen()
+        if x is None:
+            self.notify("pick a plugin first", severity="warning")
+            return
+        scope = self._scope()
+        argv = marketplace.install_argv(self.claude_bin, x.id, scope)
+        if self.armed != (x.id, scope):
+            self.armed = (x.id, scope)
+            self.query_one("#install_go", Button).label = f"Confirm: install {x.name} ({scope})"
+            note = f" It is already installed ({', '.join(x.installed)})." if x.installed else ""
+            self._out(Text(f"Press again to run: {' '.join(argv)}\nin {self.cwd}.{note} cm never accepts a "
+                           "marketplace-declared command for you.", style="bold"))
+            self.query_one("#install_go", Button).focus()
+            return
+        self.busy = True
+        self.query_one("#install_go", Button).disabled = True
+        self._out(Text(f"installing {x.id} ({scope})…", style="dim"))
+        self._install(x.id, scope)
+
+    @work(thread=True, exclusive=True, group="install")
+    def _install(self, plugin_id: str, scope: str) -> None:
+        r = marketplace.install(self.claude_bin, plugin_id, scope, self.cwd)
+        self.app.call_from_thread(self._done, plugin_id, scope, r)
+
+    def _done(self, plugin_id: str, scope: str, r: marketplace.InstallResult) -> None:
+        self.busy = False
+        self.query_one("#install_go", Button).disabled = False
+        self._disarm()
+        t = Text()
+        if r.ok:
+            self.installed = True
+            t.append(f"installed {plugin_id} ({scope} scope); the Plugins list is read again when you close this\n",
+                     style="bold green")
+            for x in self.items:
+                if x.id == plugin_id and scope not in " ".join(x.installed):
+                    x.installed.append(scope if scope == "user" else f"{scope} (this project)")
+            self._filter(self.query_one("#install_search", Input).value)
+        else:
+            t.append(marketplace.advice(r) + "\n", style="bold yellow")
+        if r.output:
+            t.append(r.output, style="dim")
+        self._out(t)
+
+    @on(Button.Pressed, "#install_close")
+    def action_close(self) -> None:
+        if self.busy:
+            self.notify("an install is running; wait for it to finish", severity="warning")
+            return
+        self.dismiss(self.installed)
 
 
 CSS = """
@@ -138,6 +341,8 @@ RadioSet:focus { border: round $accent; background: $boost; }
 #wt_row Input { width: 1fr; }
 #wt_note { color: $text-muted; }
 #wt_note.warn { color: $warning; }
+#extra_args { margin-top: 0; }
+#agent { margin-top: 1; }
 #prefill { padding: 0 1; }
 #profile_row { height: auto; }
 #profile_row Input { width: 1fr; }
@@ -156,6 +361,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         Binding("escape", "quit_app", "Quit"),
         Binding("ctrl+s", "focus_save", "Save profile"),
         Binding("ctrl+r", "refresh_connectors", "Refresh connectors"),
+        Binding("ctrl+o", "install_plugins", "Install plugins"),
         Binding("ctrl+n", "select_none", "Clear all"),
         Binding("ctrl+t", "cycle_theme", "Theme"),
         Binding("down", "flow(1)", show=False),
@@ -163,7 +369,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
     ]
 
     def __init__(self, cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
-                 notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None) -> None:
+                 notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None,
+                 last_session: str | None = None) -> None:
         super().__init__()
         self.cat = cat
         self.sel = initial
@@ -175,6 +382,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.plan_ok = True
         self.refresh_on_start = auto_refresh
         self.prefill = prefill  # "Pre-filled from your last launch in …", or None
+        self.last_session = last_session  # the remembered session the screen pre-selected, or None
+        self._extra_args = list(initial.extra_args)  # the parsed Extra args line
+        self._extra_error: str | None = None  # why the Extra args line can't be parsed
         self._armed_delete: str | None = None  # profile name armed by a first Delete press
         cfg_warnings: list[str] = []
         self.recent_limit = config_mod.recent_sessions(config_mod.load_config(), cfg_warnings)
@@ -210,6 +420,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                 yield Static(self._connector_note(), classes="note", id="conn_note")
                 yield Label("Plugins", classes="group")
                 yield FlowSelectionList(*self._plugin_items(), id="plugins")
+                yield Label("Skill packs (this session only)", classes="group")
+                yield FlowSelectionList(*self._pack_items(), id="packs")
                 # hidden entirely where cmux isn't installed (e.g. Linux)
                 for w in (Label("cmux computer use", classes="group"), FlowSelectionList(*self._cmux_items(), id="cmux")):
                     w.display = self.cat.cmux.installed
@@ -254,6 +466,13 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     yield Checkbox("tmux", value=self.sel.tmux, id="tmux",
                                    tooltip="--tmux: open the worktree session in tmux (needs Worktree)")
                 yield Static("", classes="note", id="wt_note")
+                yield FlowSelect(self._agent_options(), id="agent", allow_blank=False,
+                                 value=self._agent_value(self.sel.agent),
+                                 tooltip="--agent: the session's main agent (Space opens the list)")
+                yield Label("Extra args (forwarded after --)", classes="group")
+                yield Input(placeholder="e.g. --add-dir ../shared --verbose", id="extra_args",
+                            value=shlex.join(self.sel.extra_args),
+                            tooltip="arguments passed to claude as they are (shell quoting rules, no shell)")
                 yield Label("Profile", classes="group")
                 yield FlowSelect([(p, p) for p in profiles.list_profiles()], prompt="load profile…",
                              id="profile", allow_blank=True,
@@ -266,8 +485,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
                     yield Button("Delete", id="delete", variant="error")
                 yield Static(self._default_line(), classes="note", id="default_line")
         yield Static(id="preview")
-        yield Static("↑↓ move through all boxes · Space toggle · Enter launch · Ctrl+S save profile · Ctrl+R refresh connectors · Ctrl+T theme · Esc quit",
-                     id="hint")
+        yield Static(HINT, id="hint")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -299,7 +517,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         """Rebuild the rows and the preview so their colours follow a theme change."""
         self.sel = self._read_selection()
         for wid, items in (("local", self._local_items), ("connectors", self._connector_items),
-                           ("plugins", self._plugin_items), ("cmux", self._cmux_items)):
+                           ("plugins", self._plugin_items), ("packs", self._pack_items), ("cmux", self._cmux_items)):
             sl = self.query_one(f"#{wid}", SelectionList)
             highlighted = sl.highlighted
             sl.clear_options()
@@ -307,6 +525,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             if highlighted is not None:
                 sl.highlighted = highlighted
         self.query_one("#conn_note", Static).update(self._connector_note())
+        self._rebuild_agents()
         self._update_preview()
 
     def _cost(self, key: str) -> Text:
@@ -368,6 +587,54 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             items.append(Item(Text("no enabled plugins", style="dim"), "__none__", False, disabled=True))
         return items
 
+    def _pack_items(self) -> list[Item]:
+        items = []
+        for pk in self.cat.skill_packs:
+            t = Text(pk.name, style="bold" if not pk.error else "dim")
+            if pk.key in self.costs:
+                t.append_text(self._cost(pk.key))
+            else:
+                t.append(f"  ~{pk.estimated_tokens()} tok est.", style="dim")
+            t.append(f"  {len(pk.skills)} skill{'s' if len(pk.skills) != 1 else ''}", style="dim")
+            for r in pk.missing:
+                t.append(f"  needs {r.command} (not found)", style=self._palette()["warn"])
+            if pk.error:
+                t.append(f"  ({pk.error})", style=self._palette()["bad"])
+            if pk.description:
+                t.append(f"  {recent_mod.shorten(pk.description, 50)}", style="dim italic")
+            items.append(Item(t, pk.name, pk.name in self.sel.skill_packs and not pk.error, disabled=bool(pk.error)))
+        if not items:
+            items.append(Item(Text("no skill packs (cm skills add NAME --from DIR)", style="dim"), "__none__", False,
+                              disabled=True))
+        return items
+
+    def _agent_label(self, ag: Agent | None, name: str | None = None) -> Text:
+        if ag is None and name is None:
+            t = Text("Agent: Default", style="bold")
+            if self.cat.settings_agent:
+                t.append(f" ({self.cat.settings_agent} from settings)", style="dim")
+            return t
+        if ag is None:
+            return Text(f"Agent: {name}", style="bold").append("  (not found here)", style=self._palette()["warn"])
+        t = Text(f"Agent: {ag.name}", style="bold")
+        t.append(f"  [{ag.source}]", style="dim")
+        if self.cat.agent_block(ag):
+            t.append("  (unavailable: plugin not installed/enabled here)", style=self._palette()["bad"])
+        elif ag.description:
+            t.append(f"  {recent_mod.shorten(ag.description, 48)}", style="dim italic")
+        return t
+
+    def _agent_options(self) -> list[tuple[Text, str]]:
+        opts = [(self._agent_label(None), DEFAULT_AGENT)]
+        opts += [(self._agent_label(a), a.name) for a in self.cat.agents]
+        if self.sel.agent and self.cat.agent(self.sel.agent) is None:
+            opts.append((self._agent_label(None, self.sel.agent), self.sel.agent))  # e.g. cm -i --agent other
+        return opts
+
+    @staticmethod
+    def _agent_value(name: str | None) -> str:
+        return name or DEFAULT_AGENT
+
     def _cmux_items(self) -> list[Item]:
         st = self.cat.cmux
         t = Text("cmux-cua", style="bold" if st.available else "dim")
@@ -394,11 +661,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         local = vals("local")
         conns = vals("connectors")
         plugins = vals("plugins")
+        packs = vals("packs")
+        agent = self.query_one("#agent", Select).value
         # keep catalog order for stable previews
         sel = Selection(
             local=[s.name for s in self.cat.local if s.name in local],
             connectors=[c.name for c in self.cat.connectors if c.name in conns],
             plugins=[p.id for p in self.cat.plugins if p.id in plugins],
+            skill_packs=[p.name for p in self.cat.skill_packs if p.name in packs],
+            agent=agent if isinstance(agent, str) and agent != DEFAULT_AGENT else None,
             cmux="cmux" in vals("cmux"),
             model=radio("model", "default"),
             permissions=radio("perm", "standard"),
@@ -406,7 +677,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             awake=radio("awake", "off"),
             resume_id=(self.query_one("#resume_id", Input).value.strip() or None),
             name=(self.query_one("#name", Input).value.strip() or None),
-            extra_args=list(self.sel.extra_args),
+            extra_args=list(self._extra_args),
         )
         # a ticked Fork only counts while there is something to fork (it is greyed out otherwise)
         sel.fork = self.query_one("#fork", Checkbox).value and can_fork(sel)
@@ -431,6 +702,8 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self._update_wt_note()
         pv = self.query_one("#preview", Static)
         try:
+            if self._extra_error:
+                raise PlanError(f"Extra args: {self._extra_error}")
             plan = preview_plan(self.cat, self.sel, self.claude_bin)
         except PlanError as exc:
             self.plan_ok = False
@@ -561,8 +834,9 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
     def _apply(self, sel: Selection) -> None:
         self.sel = sel
+        self._set_extra_args(sel.extra_args)
         self._rebuild_connectors()  # the profile may use an unverified connector that has no row yet
-        for wid, values in (("local", sel.local), ("plugins", sel.plugins),
+        for wid, values in (("local", sel.local), ("plugins", sel.plugins), ("packs", sel.skill_packs),
                             ("cmux", ["cmux"] if sel.cmux else [])):
             sl = self.query_one(f"#{wid}", SelectionList)
             sl.deselect_all()
@@ -576,8 +850,15 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             for b in self.query_one(f"#{wid}", RadioSet).query(RadioButton):
                 if b.name == value:
                     b.value = True
+        self._rebuild_agents()
         self._sync_session()
         self._update_preview()
+
+    def _rebuild_agents(self) -> None:
+        """The Agent options and value from self.cat / self.sel (after a profile or an install)."""
+        box = self.query_one("#agent", Select)
+        box.set_options(self._agent_options())
+        box.value = self._agent_value(self.sel.agent)
 
     # ------------------------------------------------------------------ events
     @on(SelectionList.SelectedChanged)
@@ -591,6 +872,16 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             if box.value is not Select.NULL:
                 box.clear()  # New / Continue: no recent session is chosen any more
         self._sync_session()
+        self._update_preview()
+
+    @on(Select.Changed, "#agent")
+    def _agent_changed(self, event: Select.Changed) -> None:
+        ag = self.cat.agent(event.value) if isinstance(event.value, str) else None
+        if ag is not None and ag.plugin_id and self.cat.agent_block(ag) is None:
+            plugins = self.query_one("#plugins", SelectionList)
+            if ag.plugin_id not in plugins.selected:
+                plugins.select(ag.plugin_id)  # the agent comes with its plugin
+                self.notify(f"agent {ag.name} needs plugin {ag.plugin_id}: ticked it", timeout=4)
         self._update_preview()
 
     @on(Select.Changed, "#recent")
@@ -645,6 +936,26 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self._sync_worktree(self._read_selection())
         self._update_preview()
 
+    def _set_extra_args(self, args: list[str]) -> None:
+        self._extra_args, self._extra_error = list(args), None
+        box = self.query_one("#extra_args", Input)
+        line = shlex.join(args)
+        try:
+            same = shlex.split(box.value) == list(args)
+        except ValueError:
+            same = False
+        if not same:
+            box.value = line
+
+    @on(Input.Changed, "#extra_args")
+    def _extra_changed(self, event: Input.Changed) -> None:
+        try:
+            self._extra_args, self._extra_error = shlex.split(event.value), None
+        except ValueError as exc:  # e.g. "No closing quotation"
+            self._extra_error = f"{exc} ({event.value.strip()})"
+        self._sync_session()
+        self._update_preview()
+
     @on(Select.Changed, "#profile")
     def _profile_selected(self, event: Select.Changed) -> None:
         if event.value is Select.NULL or event.value == self.profile_name:
@@ -655,7 +966,7 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         except profiles.ProfileError as exc:
             self.notify(str(exc), severity="error")
             return
-        loaded.extra_args = list(self.sel.extra_args) or loaded.extra_args
+        loaded.extra_args = list(self._extra_args) or loaded.extra_args
         self.profile_name = name
         self.query_one("#profile_name", Input).value = name
         self._apply(loaded)
@@ -748,8 +1059,12 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         if isinstance(focused, Button):
             focused.press()
             return
+        if isinstance(focused, Select):
+            # A closed list (Recent, profile): Enter launches like everywhere else; Space opens it.
+            self.action_do_launch()
+            return
         if focused is not None and any(isinstance(n, Select) for n in focused.ancestors_with_self):
-            # A closed Select opens on Enter; an open one has focused its overlay, which picks the option.
+            # An open list has focused its overlay, which picks the option.
             raise SkipAction()
         self.action_do_launch()
 
@@ -824,8 +1139,14 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         self.notify(f"theme: {theme.name}", timeout=2)
 
     def action_select_none(self) -> None:
-        for wid in ("local", "connectors", "plugins", "cmux"):
+        for wid in ("local", "connectors", "plugins", "packs", "cmux"):
             self.query_one(f"#{wid}", SelectionList).deselect_all()
+        sel = self._read_selection()
+        if self.last_session and sel.session == "resume" and sel.resume_id == self.last_session:
+            # the pre-selected last session goes too: back to a new session
+            for b in self.query_one("#session", RadioSet).query(RadioButton):
+                if b.name == "new":
+                    b.value = True
         self._hide_prefill()
 
     def _hide_prefill(self) -> None:
@@ -854,6 +1175,43 @@ class LauncherApp(App[tuple[str, Selection] | None]):
             self.notify(w, severity="warning")
         self._update_preview()
         self.notify(f"{len(self.cat.connectors)} connectors")
+
+    def action_install_plugins(self) -> None:
+        if len(self.screen_stack) > 1:
+            return  # already open (or another modal is)
+        self.push_screen(InstallScreen(self.cat.cwd, self.claude_bin), self._after_install)
+
+    def _after_install(self, installed: bool | None) -> None:
+        if installed:
+            self._reload_plugins()
+
+    @work(thread=True, exclusive=True, group="plugins")
+    def _reload_plugins(self) -> None:
+        # file I/O stays off the UI thread
+        warnings: list[str] = []
+        plugins = discover_plugins(self.cat.cwd, warnings)
+        agents, setting = discover_agents(self.cat.cwd)
+        self.call_from_thread(self._apply_plugins, plugins, agents, setting, warnings)
+
+    def _apply_plugins(self, plugins: list[Plugin], agents: list[Agent], setting: str | None,
+                       warnings: list[str]) -> None:
+        keep = self._read_selection()
+        before = {p.id for p in self.cat.plugins}
+        self.cat.plugins, self.cat.agents, self.cat.settings_agent = plugins, agents, setting
+        keep.plugins = [p for p in keep.plugins if self.cat.plugin(p)]
+        if keep.agent and self.cat.agent(keep.agent) is None:
+            keep.agent = None
+        self.sel = keep
+        sl = self.query_one("#plugins", SelectionList)
+        sl.clear_options()
+        sl.add_options(self._plugin_items())
+        self._rebuild_agents()
+        for w in warnings:
+            self.notify(w, severity="warning")
+        new = sorted({p.id for p in plugins} - before)
+        self.notify(f"Plugins list read again: {', '.join(new)} added" if new else "Plugins list read again "
+                    "(a newly installed plugin shows once it is enabled in your settings)")
+        self._update_preview()
 
     @work(thread=True, exclusive=True, group="version")
     def _check_version(self) -> None:
@@ -891,9 +1249,10 @@ class LauncherApp(App[tuple[str, Selection] | None]):
 
 
 def run_tui(cat: Catalog, initial: Selection, *, claude_bin: str, profile: str | None = None,
-            notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None) -> Selection | None:
+            notes: list[str] | None = None, auto_refresh: bool = False, prefill: str | None = None,
+            last_session: str | None = None) -> Selection | None:
     app = LauncherApp(cat, initial, claude_bin=claude_bin, profile=profile, notes=notes, auto_refresh=auto_refresh,
-                      prefill=prefill)
+                      prefill=prefill, last_session=last_session)
     result = app.run()
     if result and result[0] == "launch":
         return result[1]

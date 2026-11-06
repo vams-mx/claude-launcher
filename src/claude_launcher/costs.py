@@ -66,6 +66,7 @@ def save(items: dict[str, Cost], baseline: int | None = None) -> None:
 def item_keys(cat: Catalog) -> list[str]:
     keys = [s.key for s in cat.local] + [c.key for c in cat.connectors if c.verified]
     keys += [p.key for p in cat.plugins]
+    keys += [p.key for p in cat.skill_packs if not p.error]
     if cat.cmux.available:
         keys.append("cmux")
     return keys
@@ -82,9 +83,11 @@ def selection_for(cat: Catalog, key: str) -> Selection:
         return Selection(connectors=conns)
     if kind == "plugin":
         return Selection(plugins=[name])
+    if kind == "pack":
+        return Selection(skill_packs=[name])
     if key == "cmux":
         return Selection(cmux=True)
-    raise ValueError("expected mcp:<name>, connector:<name>, plugin:<id> or cmux")
+    raise ValueError("expected mcp:<name>, connector:<name>, plugin:<id>, pack:<name> or cmux")
 
 
 def check_keys(cat: Catalog, keys: list[str], claude_bin: str = "claude") -> dict[str, str]:
@@ -102,6 +105,7 @@ def selection_keys(cat: Catalog, sel: Selection) -> list[str]:
     keys = [f"mcp:{n}" for n in sel.local]
     keys += [c.key for c in cat.connectors if c.name in sel.connectors]
     keys += [f"plugin:{p}" for p in sel.plugins]
+    keys += [f"pack:{p}" for p in sel.skill_packs]
     if sel.cmux:
         keys.append("cmux")
     return keys

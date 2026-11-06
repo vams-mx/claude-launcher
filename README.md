@@ -25,8 +25,11 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Exact selection.** Choose local MCP servers, claude.ai connectors (one by one), plugins and cmux computer use per session. Anything you don't pick doesn't load, and that was verified with real launches.
 - **See the cost first.** Each item shows its measured context cost, and the preview adds up the total before you launch.
 - **Profiles.** Save combinations like `memory+github` or `research`, set a default and override it with flags.
-- **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), so you don't tick the same servers every time.
+- **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), resuming the session you were in, so you don't tick the same servers every time and continuing is one Enter away.
 - **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
+- **Agents.** Start a session as one of your agents (`claude --agent`): yours, the project's, or a plugin's, whose plugin cm ticks for you.
+- **Skill packs.** Keep optional skills (a browser-automation skill, say) out of every session's context and load them only where you tick them (`--plugin-dir`, nothing installed).
+- **Install plugins from cm.** Search your marketplaces and install a plugin (`claude plugin install`) without leaving the screen; cm never auto-accepts anything for you.
 - **Worktrees.** Start a session, or a fork of a recent one, in its own git worktree (`claude -w`), named after the session. cm warns before Claude would reuse, reset or replace an existing worktree, and lists the sessions of the repository's worktrees too.
 - **Keep awake (macOS).** Optionally keep the Mac from sleeping for exactly as long as the session runs (`caffeinate -ims` or `-dims`, ended with Claude). Power settings are never changed.
 - **Hooks follow their server.** A server's hooks (for example AgentMemory's) run only in sessions where that server is selected.
@@ -37,8 +40,8 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 
 ## Contents
 
-- [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Last selection per project](#last-selection-per-project) · [Themes](#themes)
-- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [Worktrees](#worktrees--w) · [Keep awake](#keep-awake-macos) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) · [cmux computer use](#cmux-computer-use-optional)
+- [Install](#install) · [Reinstall / new machine](#reinstall--new-machine) · [Usage](#usage) · [The screen](#the-screen) · [Last selection per project](#last-selection-per-project) ([last session](#last-session), [resume by name](#resume-by-name), [extra args](#extra-args)) · [Themes](#themes)
+- [Configuration](#configuration) · [Profiles](#profiles) · [Sessions: recent, fork, name](#sessions-recent-fork-name) · [Worktrees](#worktrees--w) · [Keep awake](#keep-awake-macos) · [claude.ai connectors](#claudeai-connectors) · [Plugins](#plugins) ([installing plugins](#installing-plugins)) · [Agents](#agents) · [Skill packs](#skill-packs) · [cmux computer use](#cmux-computer-use-optional)
 - [AgentMemory](#agentmemory-optional)
 - [How it works](#how-it-works) · [Verify on your machine](#verify-on-your-machine)
 - [Security](#security) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations) · [Development](#development)
@@ -121,7 +124,8 @@ The MCP server files your `mcp_folders` point to must exist on the new machine t
 ## Usage
 
 ```bash
-cm                                   # interactive screen
+cm                                   # interactive screen (resumes the last session here, one key from New)
+cm --name backoffice -- --add-dir ../shared   # resume the session named "backoffice", with an extra dir
 cm --mcp agentmemory,github          # headless: just these two local MCP servers (+ their hooks)
 cm --profile memory+github           # a saved profile
 cm --connectors Slack,Linear         # only these claude.ai connectors
@@ -134,6 +138,10 @@ cm --mcp github --name "Release prep"          # a new session with a name
 cm --resume <id> --fork --name "X v2" --worktree   # fork into its own git worktree x-v2 (claude -w x-v2)
 cm --mcp none --worktree spike --tmux          # a new session in worktree "spike", inside tmux
 cm --mcp github --awake ims          # macOS: keep the Mac awake while this session runs
+cm --agent basic-dev-team:coordinator   # start as a plugin's agent (its plugin is ticked for the session)
+cm --skill-packs playwright          # a skill pack for this session only (--plugin-dir)
+cm plugins available --search browser   # plugins of your marketplaces; then: cm plugins install NAME@MARKET
+cm skills add playwright --from DIR  # turn a folder of skills into a pack (cm skills list / remove)
 cm --list                            # everything that can be selected, with measured context cost
 cm --where                           # config home, MCP folders scanned, and where each server came from
 cm --forget-last                     # forget the screen's last selection for this project
@@ -145,19 +153,20 @@ cm --mcp github -- --add-dir ../lib  # everything after -- goes to claude unchan
 
 ## The screen
 
-- **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
-- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Keep awake** (macOS only: Off / System (-ims) / System + display (-dims); see [Keep awake](#keep-awake-macos)), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork**, **Name**, and **Worktree** with its name and **tmux**; see [Sessions](#sessions-recent-fork-name) and [Worktrees](#worktrees--w)) and **Profiles**.
+- **Left:** grouped checklists, **Local MCP servers · claude.ai connectors · Plugins · Skill packs**, plus **cmux computer use** when cmux is installed. Each row shows the measured context cost and where the item came from. Local servers show `+hooks` when a companion settings file goes with them, and AgentMemory gets a non-destructive backend health check.
+- **Right:** **Model** (passed as `--model` aliases), **Permissions** (Standard, or ⚠ Skip, which adds `--dangerously-skip-permissions`), **Keep awake** (macOS only: Off / System (-ims) / System + display (-dims); see [Keep awake](#keep-awake-macos)), **Session** (New / Continue / Resume…, a **Recent** selector with this project's last sessions, **Fork**, **Name**, **Worktree** with its name and **tmux**, and **Agent**; see [Sessions](#sessions-recent-fork-name), [Worktrees](#worktrees--w) and [Agents](#agents)), **Extra args** (see [below](#extra-args)) and **Profiles**.
 - **Bottom:** a live preview of the exact command (secrets redacted), the isolation mode, the session file directory, what will load, the hooks added, the estimated context cost and any warnings.
 
 | key | action |
 |---|---|
 | **↑ / ↓** | move row by row through every box. Past a box's last row you land on the next box. It stops at the top and bottom instead of wrapping. |
-| **Space** | toggle |
-| **Enter** | launch (on the Recent or profile list, open it). A new session with an empty Name asks once first: the cursor jumps to Name, and a second Enter launches without a name. A worktree name that already exists, where Claude may reset or replace something, asks once too: the cursor jumps to the worktree name, and a second Enter launches. |
+| **Space** | toggle; on a closed Recent or profile list, open it |
+| **Enter** | launch, from every box including a closed Recent or profile list (in an open list it picks the row; in the profile name box it saves). A new session with an empty Name asks once first: the cursor jumps to Name, and a second Enter launches without a name. A worktree name that already exists, where Claude may reset or replace something, asks once too: the cursor jumps to the worktree name, and a second Enter launches. |
 | **Tab** | jump to the next box |
 | **Ctrl+S** | save the selection as a profile |
+| **Ctrl+O** | install a plugin from your marketplaces ([details](#installing-plugins)). (Not Ctrl+I: terminals send Ctrl+I as Tab.) |
 | **Ctrl+R** | refresh the claude.ai connector list |
-| **Ctrl+N** | clear everything (and hide the "Pre-filled from your last launch" note) |
+| **Ctrl+N** | clear everything: the lists (skill packs too), and a pre-selected last session (back to New); hides the "Pre-filled from your last launch" note. Extra args, the model and the agent are kept. |
 | **Ctrl+T** | next theme (saved) |
 | **Ctrl+P** | command palette: *Theme* picks any theme (saved) |
 | **Esc** | quit without launching |
@@ -166,14 +175,47 @@ The screen opens with what you last launched from it in this project, else your 
 
 ## Last selection per project
 
-When you launch from the screen, cm remembers the selection for the current project, and the next `cm` there opens pre-filled with it and a note: *Pre-filled from your last launch in ~/work/api (Ctrl+N clears)*. The preview works as usual; Ctrl+N clears the lists.
+When you launch from the screen, cm remembers the selection for the current project, and the next `cm` there opens pre-filled with it and a note: *Pre-filled from your last launch in ~/work/api · last session: Kafka fix (Ctrl+N clears)*. The preview works as usual; Ctrl+N clears the lists and the last session.
 
 * **The project** is the git repository you are in, found by walking up to the nearest `.git` (git itself is never run), so every subdirectory of a repository shares one entry. A linked worktree (`git worktree add`) counts as its main repository (or its bare repository); a submodule is its own project. Outside a repository it is the directory itself. A repository at `$HOME` itself (dotfiles) only counts for `~`, not for every directory under it.
-* **What is remembered:** local MCP servers, connectors, plugins, cmux, the model and Keep awake. **Never:** Skip permissions (the screen always starts on Standard), the session mode, a resume id, Fork, the session name, Worktree (and its name) or tmux.
+* **What is remembered:** local MCP servers, connectors, plugins, skill packs, cmux, the model, the agent, Keep awake, the [Extra args](#extra-args) and (see [Last session](#last-session)) the session that launch ran. **Never:** Skip permissions (the screen always starts on Standard), Fork, Worktree (and its name) or tmux. Extra args that name the session, ask for a worktree or choose the session (`--name`/`-n`, `-w`/`--worktree`/`--tmux`, `--resume`/`-r`, `--continue`/`-c`, `--session-id`) are per launch: such a line is not remembered at all.
 * **When:** written only after a launch from the screen actually started `claude` (not on Esc, `--dry-run`, or when `claude` can't be started). Headless launches (`cm --mcp …`, `cm --profile …` without `-i`) never read or write it.
 * **Order** for what the screen opens with: explicit selection flags (`cm -i --mcp …`) > `--profile NAME` > the last selection for this project > the default profile > nothing. Flags or a profile replace the last selection entirely; they don't merge with it.
 * Items that no longer exist are dropped with a warning, like for profiles. A file that can't be read or understood is ignored with a warning, and a failure to save one only warns; neither ever stops a launch.
 * Stored in `~/.claude-launcher/last/<hash of the project path>.json` (directory 0700, file 0600; `CM_CONFIG_DIR` is respected). The file also records the project path. `cm --where` shows this project's file; `cm --forget-last` deletes it. Set `"remember_last": false` in `config.json` to turn the feature off completely (nothing read or written).
+
+### Last session
+
+Most of the time you open `cm` to carry on where you were, maybe with a changed flag. So the entry also points at the session your last launch from the screen ran (`"remember_last_session": true`, the default), and the next `cm` there starts with **Session = Resume** of it, chosen in **Recent** and named in the note and the preview. Enter resumes it; Ctrl+N or **New** starts a new session as before.
+
+* **Which session:** a **resumed** session is the id you chose. For everything else (**New**, **Continue**, a **fork**, claude's own picker, Extra args that choose the session) cm notes the session files of the project before claude starts (every directory the Recent list reads: this checkout and the repository's other checkouts, plus the worktree `-w` creates; file names only, read-only, bounded) and looks again when claude exits: if **exactly one** new session file appeared, that is the session. None (e.g. a Continue that carried on in its existing file, or a session you left before saying anything) or several (another session started meanwhile) store **no** session: cm doesn't guess. cm never passes `--session-id` (see [Limitations](#limitations): it would break cmux restores).
+* **What is stored:** the id, the name, and the checkout it ran in when that is another worktree of the repository (it is resumed from there, like a Recent row marked `⎇`). Never Fork, Worktree or tmux: a remembered fork comes back as a plain resume of the fork.
+* **Still there?** The session must still exist (cm looks for its transcript in this project and its other checkouts). If it doesn't (deleted, or a new session you left before saying anything, which Claude doesn't keep), the screen starts on New with a note: *last session 'X' no longer exists; starting a new session*.
+* **Only when nothing else chose a session:** explicit selection flags (`--continue`, `--resume`, `--mcp` …, or `-i --profile`), a profile's own session, `--name NAME` (see [resume by name](#resume-by-name)) and Extra args that choose the session all win. Headless launches and `--dry-run` never read or write it.
+* `"remember_last_session": false` keeps remembering the rest of the selection but no session (and takes no before/after look at the session files).
+
+### Resume by name
+
+`cm --name NAME` opens the screen on **Resume** of this project's session that has exactly that name, if there is one (your own name from `/rename` or `--name`, compared trimmed and case-insensitively; sessions of the repository's other checkouts count; the most recent one wins if several match; the 50 most recent sessions are looked at). NAME stays in **Name**, and the preview says `resume backoffice (existing session)`. Without a match it is a new session called NAME, as before. So
+
+```bash
+cm --name backoffice -- --add-dir ../shared
+```
+
+picks up the "backoffice" session with one more directory. Headless launches keep their meaning: `cm --mcp none --name backoffice` always starts a new session.
+
+**Adding a directory without relaunching.** Inside a running session, `/add-dir <path>` adds one for that session, no restart needed. To make it permanent for a project, list it under `permissions.additionalDirectories` in the project's `.claude/settings.local.json`:
+
+```json
+{ "permissions": { "additionalDirectories": ["../shared"] } }
+```
+
+### Extra args
+
+The **Extra args** line on the screen holds the arguments forwarded to claude after `--`, shown with shell quoting (`--add-dir 'my dir'`). Edit it freely: it is split with shell rules (`shlex`, no shell is run) and goes into the command as it is. A line that can't be split (an unclosed quote), or one that repeats something cm already sets, shows in the preview as *Cannot launch* and Enter does nothing until it is fixed: `--name`/`-n` while Name is set, `-w`/`--worktree`/`--tmux` while Worktree is ticked, `--resume`/`-r`/`--continue`/`-c` while Session is Continue or Resume, `--agent` while Agent isn't Default. Your own `--session-id` there is forwarded as it is (with Continue or Resume it needs Fork, Claude's rule); cm never adds one.
+
+* `cm … -- <args>` fills the line; without `--` it starts from the remembered ones (per project, in the last selection), else from a loaded profile's (profiles keep storing them, as before).
+* ↑/↓ move to and past it like any box; Enter there launches.
 
 ## Themes
 
@@ -232,7 +274,8 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
   "INSTALL_AGENT_MEMORY": "0",
   "session_retention_days": 60,
   "recent_sessions": 3,
-  "remember_last": true
+  "remember_last": true,
+  "remember_last_session": true
 }
 ```
 
@@ -246,6 +289,7 @@ Plain JSON. Keys that start with `_` are comments and are ignored. All keys are 
 | `session_retention_days` | How long a session directory in `sessions/` is kept after its last use. Use means a launch through cm, or any start or resume of a session with those files, including a cmux restore (a SessionStart hook marks the directory). The hook can't run when hooks are turned off (`disableAllHooks: true`, or a managed policy that allows only managed hooks); then only launches through cm count, so a session you only ever restore expires. In that case set `0`. Default `60`; `0` keeps them forever. Older ones are deleted on the next launch. A cmux restore of a session whose files were deleted fails with `MCP config file not found`; start it again with cm (`cm --resume <id>`). |
 | `recent_sessions` | How many of the current project's Claude Code sessions the screen's **Recent** selector lists, newest activity first. Default `3`, at most `50`; `0` hides the selector. `cm --sessions` lists the same number (3 when this is `0`); `cm --sessions N` overrides it. |
 | `remember_last` | `true` (default): the screen opens with what you last launched from it in the same project ([details](#last-selection-per-project)). `false` turns that off completely: nothing is read or written. |
+| `remember_last_session` | `true` (default): also remember the session that launch ran (new, resumed, continued or forked) and start the screen on resuming it ([details](#last-session)); cm finds a new session by the one transcript file that appeared while claude ran, never with `--session-id`. `false`: no session is remembered. Needs `remember_last`. |
 
 `cm --where` shows the config home, this project's last-selection file, each folder in scan order (with how many server files it holds, or `missing`), the explicit sources, and the file every server came from. Add `--json` for machine-readable output. It prints paths only, never server definitions or `env` values.
 
@@ -289,7 +333,7 @@ cm --profile memory+github --model sonnet   # flags override profile fields
 
 Profiles live in `~/.claude-launcher/profiles/<name>.json`. Names may use letters, digits, `.`, `_`, `+` and `-`. When a profile is loaded, entries that no longer exist (a removed server, a vanished connector, cmux on a machine without cmux) are dropped with a warning.
 
-A profile keeps the session *mode* (New / Continue / Resume) and Keep awake, but never a session id, the Fork tick, a session name, Worktree or tmux: those belong to one launch (a hand-edited profile can't set them either).
+A profile keeps the session *mode* (New / Continue / Resume), the agent, the skill packs and Keep awake, but never a session id, the Fork tick, a session name, Worktree or tmux: those belong to one launch (a hand-edited profile can't set them either).
 
 ## Sessions: recent, fork, name
 
@@ -298,7 +342,7 @@ The **Session** box on the screen:
 | control | what it does |
 |---|---|
 | **New / Continue last / Resume…** | as before: a new session, `--continue`, or claude's own resume picker (`--resume` without an id; type an id in the box below it to resume that one). |
-| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Sessions of the repository's other checkouts (its git worktrees, including Claude's `.claude/worktrees/*`, and the main checkout when you are in a worktree) are listed too, marked `· ⎇ <worktree>`, and are resumed from that worktree's directory (the preview says `runs in <worktree>`). The same goes for a session that was moved into a worktree (`claude -w <name> --resume <id>`) or that left one: Claude keeps such a transcript with the main checkout, and once the session leaves the worktree a plain resume starts in the main checkout. cm reads the last worktree Claude recorded for the session (or, failing that, the directory it last ran in) and, while that worktree still exists, resumes it there, so picking it takes you back into the worktree. Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Enter or Space opens it. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
+| **Recent** | the current project's last sessions (`recent_sessions`, default 3), newest activity first, shown as `FORCE Kafka reconciliation · 2 h ago`. Sessions of the repository's other checkouts (its git worktrees, including Claude's `.claude/worktrees/*`, and the main checkout when you are in a worktree) are listed too, marked `· ⎇ <worktree>`, and are resumed from that worktree's directory (the preview says `runs in <worktree>`). The same goes for a session that was moved into a worktree (`claude -w <name> --resume <id>`) or that left one: Claude keeps such a transcript with the main checkout, and once the session leaves the worktree a plain resume starts in the main checkout. cm reads the last worktree Claude recorded for the session (or, failing that, the directory it last ran in) and, while that worktree still exists, resumes it there, so picking it takes you back into the worktree. Names in italics are not ones you gave (an AI title, or the first prompt shortened to 60 characters). Picking one means *resume that session id* (`--resume <id>`). ↑/↓ move to and past it like any other box; Space opens it, and Enter on it while it is closed launches. With no sessions yet it says `none in this project yet`; if Claude's files can't be understood it says `unavailable`. |
 | **Fork** | adds `--fork-session`: Claude continues the chosen conversation under a new session id and leaves the original as it was. Enabled when a session id is chosen (Recent or typed) and with Continue. |
 | **Name** | always visible; passed as `--name <name>` (shown in Claude's prompt box, `/resume` picker and terminal title). |
 
@@ -323,10 +367,10 @@ cm --continue --fork                       # fork the last conversation
 cm --mcp none --name "Scratch"             # headless launches never ask for a name
 ```
 
-* `--name NAME` has only a long form, because `-n` is cm's `--dry-run`. It is not a selection flag: `cm --name X` alone still opens the screen, with Name filled in.
+* `--name NAME` has only a long form, because `-n` is cm's `--dry-run`. It is not a selection flag: `cm --name X` alone still opens the screen, with Name filled in, on Resume of the session already called X if there is one ([resume by name](#resume-by-name)).
 * `--fork` needs `--resume <id>` or `--continue`; anything else (including `--resume` without an id) is an error.
 * A name given both to cm and after `--` (`--name`/`-n`) is an error rather than two names. One given only after `--` is passed through as usual.
-* `--fork-session` and `--name` go right before `--resume`, which stays last.
+* `--fork-session` and `--name` go right before `--resume`, which stays last. `--agent` and the skill packs' `--plugin-dir`s go before the forwarded args. cm never passes `--session-id`.
 
 **`--name` with `--resume` renames the session.** This was checked by reading Claude Code 2.1.281's own code, not by running a session. `--name` sets the session's title outright, while restoring a resumed (or forked) session only fills in its stored title when none is set yet, so the name you pass wins whichever happens first. Claude then writes it to the transcript as a `custom-title` record (the record `/rename` writes) when it re-appends the session's metadata. With `--fork-session` the name belongs to the new session, and the original keeps its own. If another *running* session on the same machine already uses that name, Claude may add a suffix to it.
 
@@ -417,6 +461,73 @@ cm lists plugins that are enabled in `~/.claude/settings.json` or the project's 
 * A plugin that isn't installed for the current scope can't be turned on this way.
 * `--strict-mcp-config` drops plugin-bundled MCP servers, so cm switches to deny-list mode when you select a plugin that bundles MCP servers.
 * Built-in plugins (`*@builtin`) can't be disabled per session.
+
+### Installing plugins
+
+**Ctrl+O** on the screen (or `cm plugins` on the command line) installs a plugin from the marketplaces you already have (`claude plugin marketplace list`).
+
+* **The list** comes from each marketplace's own catalog, read-only: `~/.claude/plugins/known_marketplaces.json` names the marketplaces and their folders (plus any folder in `~/.claude/plugins/marketplaces/`), and each one's `.claude-plugin/marketplace.json` (or `marketplace.json`) lists its plugins. Missing or malformed files are skipped with a note. Type to search (name, marketplace, description, category); installed plugins are marked with their scope (`✓ installed: user`, `local (another project)`, …).
+* **Scope:** **User** (default, all your projects), **Project** (shared through the project's `.claude/settings.json`) or **Local** (this project, only you).
+* **Install** is pressed twice: the first press shows the exact command, the second runs it: `claude plugin install <plugin>@<marketplace> --scope <scope> --json`, as an argv (no shell), from the project's directory, with stdin closed and a 5-minute timeout, off the screen's thread. Claude's output is shown below the list.
+* **Nothing is auto-accepted.** Some marketplace plugins are installed by running a command the marketplace declares (or fetch their archive through a `headersHelper` command). Claude Code 2.1.281 shows such a command and asks; without a terminal it refuses unless `-y` (or `--accept-command <sha256>`) is given, and reports the command. cm never passes `-y`, `--yes` or `--accept-command`: it shows the command claude reported and tells you to run `claude plugin install <plugin>@<marketplace> --scope <scope>` in a terminal yourself, where claude shows it and asks you.
+* Afterwards the **Plugins** list (and the agents) are read again. A plugin appears there once it is enabled in your settings (`claude plugin install` enables it for the scope you chose).
+
+```bash
+cm plugins available [--json] [--search TEXT]     # what your marketplaces offer, installed ones marked
+cm plugins install playwright@claude-plugins-official --scope project
+```
+
+`cm plugins install` behaves the same: it prints claude's output, and if a command has to be accepted it tells you to run the install in a terminal. This is the only place where cm changes Claude Code's files, and only through `claude plugin install`, on your explicit request.
+
+## Agents
+
+The **Agent** box (in the Session area) picks the session's main agent, passed as `--agent <name>` (Claude Code: *"Agent for the current session. Overrides the 'agent' setting."*).
+
+* **Default** passes no `--agent`. If your user, project or local settings set `agent`, it reads *Default (reviewer from settings)*, and that agent applies as usual.
+* **The list** is read-only: `~/.claude/agents/*.md` (user), the project's `.claude/agents/*.md` (the git root's and the current directory's), and the `agents/*.md` of every installed plugin, named `<plugin>:<agent>` (e.g. `basic-dev-team:coordinator`). Each row shows its source and the frontmatter `description`; the name is the frontmatter `name`, else the file name. A file with broken frontmatter still lists under its file name. A project agent hides a user agent of the same name, as in Claude Code.
+* **A plugin's agent needs its plugin.** Picking one ticks that plugin in **Plugins** (a note says so, and the preview's *Agent* line shows `needs plugin …, enabled for this session`). If the plugin is installed only for another project, or installed but not enabled in your settings, the preview says why and Enter doesn't launch.
+* `--agent` after `--` together with an Agent other than Default is an error (given twice); on its own it is forwarded as usual. `--agents <json>` (inline definitions) is never touched.
+* `cm --agent NAME` does the same from the command line (a selection flag, like `--model`; `--agent default` = none). It is remembered per project and stored in profiles; an agent that no longer exists is dropped with a note.
+
+## Skill packs
+
+Skills in `~/.claude/skills` and in the project's `.claude/skills` **always load**: every session lists their names and descriptions, and cm can't turn them off per session. Skills you only need now and then (browser automation, a big framework's how-tos) are better kept in a **skill pack**: cm loads a pack only in the sessions where you tick it, through `--plugin-dir <pack>` (Claude Code's *"Load a plugin from a directory … for this session only"*). Nothing is installed, and Claude's own files are never touched.
+
+```
+~/.claude-launcher/skills/<pack>/
+  .claude-plugin/plugin.json     {"name": "<pack>", "description": …}   cm writes it if missing
+  skills/<skill>/SKILL.md        one folder per skill (frontmatter name / description)
+  pack.json                      optional: {"description": "...", "requires": [{"command": "playwright-cli",
+                                            "install_hint": "npm i -g @playwright/cli"}]}
+```
+
+* **On the screen** the *Skill packs* group lists each pack with its number of skills and its context cost: measured (`cm --measure pack:<name>`) or estimated from its skills' names and descriptions (`~120 tok est.`; a skill's body loads only when it is used). A pack whose `requires` command isn't on your `PATH` shows *needs playwright-cli (not found)*, and the preview warns with the install hint; it is never blocked. A pack whose `plugin.json` can't be read is greyed out with the reason.
+* Ticked packs are remembered per project and stored in profiles. `cm --skill-packs none|all|a,b` selects them from the command line.
+* **The shape** follows `claude plugin validate`: a kebab-case pack name (lowercase letters, digits, `-`), a manifest with `name`, `description`, `version` and `author` (cm writes all four, so the validator has nothing to warn about), and a frontmatter `description` in every `SKILL.md` (cm notes a missing one). Check a pack yourself with `claude plugin validate ~/.claude-launcher/skills/<pack>` (manifest) and `claude plugin validate ~/.claude-launcher/skills/<pack>/skills` (the skills).
+
+```bash
+cm skills add NAME --from DIR [--link] [--description TEXT] [--requires CMD[=INSTALL_HINT]]
+cm skills list [--json]
+cm skills remove NAME [--yes]        # asks first; a linked skill's target is never deleted
+```
+
+`--from` takes a skill folder (it holds `SKILL.md`), a folder of skill folders, or a folder with a `skills/` folder of them. They are copied, or symlinked with `--link` (whether Claude Code follows a symlinked skill folder inside a `--plugin-dir` is not verified; copy when in doubt).
+
+**Recipe: playwright-cli as a skill pack.** Microsoft's `playwright-cli` drives a browser from the shell, and ships a skill that teaches Claude to use it. Keep that skill out of sessions that don't browse:
+
+```bash
+npm i -g @playwright/cli                       # 1. the command the skill needs
+playwright-cli --help                          # 2. see how it installs its skills; at the time of writing:
+mkdir -p /tmp/pw-skills && cd /tmp/pw-skills   #    run its skill install in an empty folder, so the skills
+playwright-cli install --skills                #    land there (.claude/skills/…) and not in a real project
+cm skills add playwright --from /tmp/pw-skills/.claude/skills \
+  --description "Browser automation with playwright-cli" \
+  --requires "playwright-cli=npm i -g @playwright/cli"
+rm -r /tmp/pw-skills                           # 3. the pack has its own copy
+cm --skill-packs playwright                    # or tick "playwright" on the screen
+```
+
+Step 2 depends on playwright-cli's own docs (check `playwright-cli --help`; the subcommand that installs its skills may change). Whatever it is, install the skills into a temporary folder and point `--from` at the folder that holds the skill folders. `--requires` makes the screen say *needs playwright-cli (not found)* on a machine without it.
 
 ## cmux computer use (optional)
 
@@ -525,7 +636,7 @@ This is documented behaviour of Claude Code, **verified on Claude Code 2.1.281**
 | `--plugin-dir` | Adds a plugin for the session only. Its bundled MCP servers are dropped under `--strict-mcp-config`. | yes |
 | hooks in `--settings` | **Added** to user/project hooks, not replacing them. | **yes** |
 | more than one `--settings` | Claude reads only one. cm always passes exactly one merged file. | avoided |
-| `cmux-claude-wrapper` | Adds `--session-id`, deep-merges a user `--settings` into its own hooks file and, unless `--strict-mcp-config` or `CMUX_COMPUTER_USE_MCP_DISABLED=1` is present, prepends its own `cmux-cua` `--mcp-config` and exports the token. | **yes** |
+| `cmux-claude-wrapper` | Adds `--session-id` (not when the command already has `--session-id`, `--resume` or `--continue`; cm itself never passes `--session-id`), deep-merges a user `--settings` into its own hooks file and, unless `--strict-mcp-config` or `CMUX_COMPUTER_USE_MCP_DISABLED=1` is present, prepends its own `cmux-cua` `--mcp-config` and exports the token. | **yes** |
 | cmux computer use in strict mode | cm's `cmux-cua` entry, built from the wrapper's template with the token passed only through the environment, connects and lists its tools. | **yes** |
 
 Managed policy lives in `/Library/Application Support/ClaudeCode/` on macOS and `/etc/claude-code/` on Linux (override with `CM_MANAGED_DIR`). cm reads server names from `managed-mcp.json` for the deny list, and warns if `managed-settings.json` or `managed-settings.d/*.json` sets `disableSideloadFlags`, which makes Claude refuse `--mcp-config`.
@@ -582,7 +693,9 @@ When `claude --version` isn't a version the control matrix was verified on, `cm 
 * A cmux restore doesn't restart [Keep awake](#keep-awake-macos)'s caffeinate (it isn't part of Claude's command line), and a closed lid still sleeps the Mac outside clamshell mode.
 * A cmux restore replays the command line but not the environment cm set (see [Security](#security)), and it fails once the session's files have been cleaned up after `session_retention_days` without use.
 * The Recent list depends on Claude Code's undocumented transcript format (verified on 2.1.281). A future format change makes it say `unavailable` rather than break cm, but it may then list nothing until cm is updated.
-* A cmux restore replays the original command line. For a session started as a fork that line contains `--fork-session`; whether cmux drops it when it adds its own `--resume <id>` is up to cmux and not verified, so a restore could fork once more.
+* A cmux restore replays the original command line. For a session started as a fork that line contains `--fork-session`; whether cmux drops it when it adds its own `--resume <id>` is up to cmux and not verified, so a restore could fork once more. cm never passes `--session-id` (a restore appends `--resume <id>`, and Claude refuses `--session-id` next to `--resume` without `--fork-session`), so cmux restores of sessions started from cm are not affected by the [last session](#last-session) feature. A `--session-id` you put after `--` yourself is in that replayed line too.
+* The [last session](#last-session) is found by the one session file that appeared while claude ran. A **Continue** that carries on in its existing transcript, or a launch during which another session of the repository started too, stores no session (cm doesn't guess). A new session started at the same moment in the same project by something else could be taken for it.
+* Agents: plugin agents are found in `<plugin>/agents/*.md` only (a manifest pointing elsewhere isn't followed); Claude Code decides at runtime whether a name given to `--agent` exists.
 * **cmux restore with `-w`.** The replayed command contains `-w <name>`. If you removed that worktree's directory but kept its branch `worktree-<name>`, the restore makes Claude recreate it with `git worktree add -B`, resetting the branch to origin's default branch (its own commits stay only in the reflog: `git reflog show worktree-<name>`). cm can't intercept a cmux restore, so it can't warn there; keep the directory, or delete the branch too (`git branch -D worktree-<name>` once its work is merged or not needed). A restored `--tmux` session attaches to a still-open tmux session as it is. With `-w`, `--continue` isn't offered at all.
 * **Worktree sessions and the deny list.** The catalog (and in deny-list mode the list of blocked servers) is built for the directory cm runs in. Claude also reads the worktree's own `.mcp.json`; a project server defined only on the worktree's branch isn't known to cm, so in deny-list mode (connectors selected) it isn't blocked. Strict mode is unaffected.
 * Built-in plugins can't be disabled per session. Measured costs come from Haiku and differ slightly on other models.

@@ -261,7 +261,7 @@ def test_recent_sessions_is_configurable(catalog, fake_home):
     drive(app, hidden)
 
 
-def test_recent_is_a_box_in_the_arrow_flow_and_enter_opens_it(catalog, fake_home):
+def test_recent_is_a_box_in_the_arrow_flow_and_space_opens_it(catalog, fake_home):
     standard_sessions(fake_home.project)
     app = LauncherApp(catalog, Selection(), claude_bin="claude")
 
@@ -281,7 +281,7 @@ def test_recent_is_a_box_in_the_arrow_flow_and_enter_opens_it(catalog, fake_home
         await pilot.press("up")
         await pilot.pause()
         assert app.focused.id == "recent"
-        await pilot.press("enter")  # opens instead of launching
+        await pilot.press("space")  # opens the list
         await pilot.pause()
         assert box.expanded and app.return_value is None
         await pilot.press("down", "down", "enter")  # blank, first, second -> the second session

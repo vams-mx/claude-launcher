@@ -1,6 +1,8 @@
 """`cm` command line.
 
-  cm                              interactive screen (pre-filled from your last launch here, else the default profile)
+  cm                              interactive screen (pre-filled from your last launch here, resuming its session,
+                                  else the default profile)
+  cm --name backoffice            the screen, resuming this project's session named "backoffice" if there is one
   cm --profile memory+gdrive      launch a saved profile without the screen
   cm --mcp agentmemory,gdrive     choose local MCP servers
   cm --connectors none|all|Slack,Todoist
@@ -11,9 +13,14 @@
   cm --resume <id> --fork --name "X v2" --worktree [--tmux]   fork it into its own git worktree (claude -w x-v2)
   cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
   cm --awake ims|dims|off         macOS: keep the Mac awake while claude runs (caffeinate -w <claude pid>)
+  cm --agent NAME                 the session's agent (claude --agent), e.g. a plugin's "team:coordinator"
+  cm --skill-packs playwright     skill packs for this session only (--plugin-dir each)
   cm ... -- <args forwarded verbatim to claude>
   cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
   cm setup agentmemory            install and wire up AgentMemory (opt-in, asks first)
+  cm plugins available [--json]   plugins in your configured marketplaces (installed ones marked)
+  cm plugins install P@M [--scope user|project|local]   claude plugin install, never auto-accepting
+  cm skills list | add NAME --from DIR [--link] | remove NAME   manage skill packs
 """
 
 from __future__ import annotations
@@ -29,12 +36,15 @@ from . import __version__, compat
 from . import awake as awake_mod
 from . import config as cfg_mod
 from . import costs as costs_mod
-from . import profiles, recent, remember, sessions
+from . import marketplace, profiles, recent, remember, sessions, skillpacks
 from . import worktree as wt_mod
 from .catalog import Catalog, connectors_stale, discover, refresh_connectors
 from .paths import config_dir, config_file, legacy_config_dir, managed_dir, tilde
 from .launcher import launch
-from .plan import MODELS, PlanError, Selection, can_fork, passthrough_name, passthrough_worktree
+from .plan import (
+    MODELS, PlanError, Selection, can_fork, passthrough_agent, passthrough_name, passthrough_session,
+    passthrough_worktree, session_name,
+)
 from .preview import plain, preview_plan
 from .redact import redact_server
 
@@ -60,7 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Start Claude Code with exactly the MCP servers, claude.ai connectors, plugins and "
                     "cmux computer use you choose. Without selection flags, opens the interactive screen.",
         epilog="Arguments after `--` are forwarded verbatim to claude. "
-               "Setup: `cm setup init`, `cm setup agentmemory` (see `cm setup --help`).",
+               "Setup: `cm setup init`, `cm setup agentmemory` (see `cm setup --help`). "
+               "Plugins and skill packs: `cm plugins --help`, `cm skills --help`.",
     )
     sel = p.add_argument_group("selection (any of these skips the interactive screen)")
     sel.add_argument("--profile", metavar="NAME", help="start from a saved profile")
@@ -71,6 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="cmux computer use on/off")
     sel.add_argument("--no-mcp", action="store_true", help="no local MCPs, no connectors, no cmux")
     sel.add_argument("--model", choices=MODELS, help="model alias (default = your configured model)")
+    sel.add_argument("--agent", metavar="NAME",
+                     help="the session's agent (claude --agent): one of ~/.claude/agents, the project's "
+                          ".claude/agents or a plugin's (<plugin>:<agent>, ticks that plugin); 'default' = none")
+    sel.add_argument("--skill-packs", metavar="LIST",
+                     help="skill packs for this session only: none | all | name[,name] (see cm skills list)")
     sel.add_argument("--skip-permissions", action="store_true",
                      help="pass --dangerously-skip-permissions (use with care)")
     g = sel.add_mutually_exclusive_group()
@@ -122,7 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _selection_flags_given(a: argparse.Namespace) -> bool:
     return any([a.profile, a.mcp is not None, a.connectors is not None, a.plugins is not None,
-                a.cmux is not None, a.no_mcp, a.model, a.skip_permissions, a.cont, a.resume is not None])
+                a.cmux is not None, a.no_mcp, a.model, a.skip_permissions, a.cont, a.resume is not None,
+                a.agent is not None, a.skill_packs is not None])
 
 
 def _has_tty() -> bool:
@@ -190,10 +207,28 @@ def resolve_selection(a: argparse.Namespace, cat: Catalog, passthrough: list[str
             if missing:
                 raise PlanError(f"unknown plugin(s): {', '.join(missing)}")
             sel.plugins = found
+    if a.skill_packs is not None:
+        v = a.skill_packs.strip().lower()
+        if v == "none":
+            sel.skill_packs = []
+        elif v == "all":
+            sel.skill_packs = [p.name for p in cat.skill_packs]
+        else:
+            found, missing = cat.resolve_skill_packs(_csv(a.skill_packs))
+            if missing:
+                raise PlanError(f"unknown skill pack(s): {', '.join(missing)} (see cm skills list)")
+            sel.skill_packs = found
     if a.cmux is not None:
         sel.cmux = a.cmux
     if a.model:
         sel.model = a.model
+    if a.agent is not None:
+        name = a.agent.strip()
+        sel.agent = None if name.lower() in ("", "default", "none") else name
+    if sel.agent and (ag := cat.agent(sel.agent)) and ag.plugin_id and ag.plugin_id not in sel.plugins:
+        if cat.plugin(ag.plugin_id) is not None:
+            sel.plugins = [p.id for p in cat.plugins if p.id in sel.plugins or p.id == ag.plugin_id]
+            notes.append(f"agent {ag.name} comes with plugin {ag.plugin_id}: enabled it for this session")
     if a.skip_permissions:
         sel.permissions = "skip"
     if a.cont:
@@ -246,6 +281,64 @@ def finish_session(cwd: Path, sel: Selection, *, headless: bool = False) -> list
     return notes
 
 
+# Never remembered, like cm's own Skip permissions and Fork: a permission bypass or a fork must
+# be chosen on purpose for each launch, not come back pre-filled.
+_NOT_REMEMBERED = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+                   "--permission-mode", "--fork-session")
+
+
+def remembered_extra_args(args: list[str]) -> list[str]:
+    """The extra args worth remembering: none when they name the session, ask for a worktree,
+    choose the session, fork it or change permissions (those are per launch, like cm's own Name /
+    Worktree / Session / Fork / Skip permissions)."""
+    if passthrough_name(args) or passthrough_worktree(args) or passthrough_session(args):
+        return []
+    if any(a in _NOT_REMEMBERED or a.startswith(tuple(f"{f}=" for f in _NOT_REMEMBERED)) for a in args):
+        return []
+    return list(args)
+
+
+def known_session(sel: Selection, titles: dict[str, str] | None = None) -> remember.LastSession | None:
+    """The session a launch runs when it is known before claude starts: the id being resumed (a
+    plain resume, not a fork, with no arguments after `--` choosing another). Everything else is
+    found after claude exits (session_from_diff)."""
+    if (sel.session != "resume" or not sel.resume_id or sel.fork or passthrough_session(sel.extra_args)
+            or "--fork-session" in sel.extra_args):  # a fork after `--` runs a new id: found by the diff
+        return None
+    try:
+        name = session_name(sel)
+    except PlanError:
+        name = None
+    return remember.LastSession(sel.resume_id, name or (titles or {}).get(sel.resume_id), sel.launch_dir)
+
+
+def session_places(cwd: Path, sel: Selection) -> list[Path]:
+    """Where a launch's session file can appear: the directory claude starts in (its other
+    checkouts are added by recent.snapshot), and the worktree claude -w creates."""
+    where = Path(sel.launch_dir) if sel.launch_dir else cwd
+    places = [where]
+    if sel.worktree and (repo := wt_mod.find_repo(where)) is not None:
+        places.append(repo.root / wt_mod.WORKTREES_DIR / sel.worktree)
+    return places
+
+
+def session_from_diff(before: recent.Snapshot, sel: Selection) -> remember.LastSession | None:
+    """New / Continue / fork / claude's picker: the one session file that appeared while claude ran
+    (recent.new_session), or None when none or several did. Never raises."""
+    try:
+        found = recent.new_session(before)
+        if found is None:
+            return None
+        try:
+            name = session_name(sel)
+        except PlanError:
+            name = None
+        # a session of the launch directory itself is resumed from there when that is another checkout
+        return remember.LastSession(found.id, found.title or name, found.cwd or sel.launch_dir)
+    except Exception:  # noqa: BLE001 - remembering must never fail a launch
+        return None
+
+
 def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> None:
     costs = costs_mod.load()
     notes = list(notes or [])
@@ -260,6 +353,12 @@ def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> N
             "connectors_refreshed_at": cat.connectors_refreshed_at,
             "plugins": [{"id": p.id, "enabled_in": p.enabled_in, "mcp_servers": p.mcp_servers,
                          "cost": vars(costs[p.key]) if p.key in costs else None} for p in cat.plugins],
+            "skill_packs": [{"name": p.name, "skills": len(p.skills), "path": str(p.path), "error": p.error,
+                             "warnings": p.warnings(), "estimated_tokens": p.estimated_tokens(),
+                             "cost": vars(costs[p.key]) if p.key in costs else None} for p in cat.skill_packs],
+            "agents": [{"name": a.name, "source": a.source, "description": a.description, "plugin": a.plugin_id,
+                        "available": cat.agent_block(a) is None} for a in cat.agents],
+            "default_agent": cat.settings_agent,
             "cmux": {"installed": cat.cmux.installed, "available": cat.cmux.available, "note": cat.cmux.reason,
                      "in_cmux": cat.cmux.in_cmux,
                      "token": cat.cmux.token_source, "cost": vars(costs["cmux"]) if "cmux" in costs else None},
@@ -291,6 +390,13 @@ def print_list(cat: Catalog, as_json: bool, notes: list[str] | None = None) -> N
     for p in cat.plugins:
         t.add_row("plugin", p.id, "enabled in: " + "/".join(p.enabled_in) +
                   (f" · MCP: {', '.join(p.mcp_servers)}" if p.mcp_servers else ""), costs_mod.fmt(costs.get(p.key)))
+    for pk in cat.skill_packs:
+        cost = costs_mod.fmt(costs[pk.key]) if pk.key in costs else f"~{pk.estimated_tokens()} tok (est.)"
+        t.add_row("skill pack", pk.name, f"{len(pk.skills)} skill(s)" + (f" · {pk.description}" if pk.description else "")
+                  + "".join(f" · {w}" for w in ([pk.error] if pk.error else pk.warnings())), cost)
+    for ag in cat.agents:
+        block = " · unavailable here" if cat.agent_block(ag) else ""
+        t.add_row("agent", ag.name, f"[{ag.source}]{block} " + recent.shorten(ag.description, 100), "")
     st = cat.cmux
     if st.installed:  # no cmux row at all where cmux isn't installed
         t.add_row("cmux", "cmux-cua", ("available" if st.available else "unavailable") +
@@ -460,11 +566,171 @@ def setup_main(argv: list[str]) -> int:
     return run_setup(from_installer=a.from_installer, with_service=not a.no_service)
 
 
+# ---------------------------------------------------------------------------
+# cm plugins / cm skills
+
+
+def build_plugins_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="cm plugins", description="Plugins of your configured marketplaces.")
+    sub = p.add_subparsers(dest="what", required=True)
+    av = sub.add_parser("available", help="list the plugins your marketplaces offer (read-only), installed ones marked")
+    av.add_argument("--json", action="store_true")
+    av.add_argument("--search", metavar="TEXT", help="only those whose id, description or category match")
+    ins = sub.add_parser("install", help="run `claude plugin install <plugin@marketplace> --scope …` "
+                                         "(never accepts a marketplace-declared command for you)")
+    ins.add_argument("plugin", metavar="PLUGIN@MARKETPLACE")
+    ins.add_argument("--scope", choices=marketplace.SCOPES, default="user",
+                     help="user (default), project (shared via .claude/settings.json) or local (this project, you only)")
+    for x in (p, av, ins):
+        x.add_argument("--claude-bin", metavar="PATH", default=os.environ.get("CM_CLAUDE_BIN"), help=argparse.SUPPRESS)
+        x.add_argument("--cwd", metavar="DIR", help=argparse.SUPPRESS)
+    return p
+
+
+def plugins_main(argv: list[str]) -> int:
+    a = build_plugins_parser().parse_args(argv)
+    cwd = Path(a.cwd).resolve() if a.cwd else Path.cwd()
+    warnings: list[str] = []
+    if a.what == "available":
+        items = [x for x in marketplace.available(cwd, warnings) if not a.search or x.matches(a.search)]
+        if a.json:
+            print(json.dumps({"plugins": [x.to_json() for x in items], "warnings": warnings}, indent=2,
+                             ensure_ascii=False))
+            return 0
+        width = max([len(x.id) for x in items] + [10])
+        for x in items:
+            mark = f"  [installed: {', '.join(x.installed)}]" if x.installed else ""
+            desc = recent.shorten(x.description, 90) if x.description else ""
+            print(f"{x.id:<{width}}  {desc}{mark}")
+        if not items:
+            print("no plugins found" + (f" matching {a.search!r}" if a.search else
+                                        " (no marketplaces configured? claude plugin marketplace add …)"),
+                  file=sys.stderr)
+        for w in warnings:
+            _err(f"warning: {w}")
+        return 0
+    claude_bin = a.claude_bin or shutil.which("claude") or "claude"
+    try:
+        marketplace.install_argv(claude_bin, a.plugin, a.scope)
+    except ValueError as exc:
+        _err(str(exc))
+        return 2
+    known = {x.id: x for x in marketplace.available(cwd, warnings)}
+    if a.plugin not in known:
+        _err(f"warning: {a.plugin} is not in the catalog of a configured marketplace (cm plugins available); "
+             "asking claude anyway")
+    print(f"running: {' '.join(marketplace.install_argv(claude_bin, a.plugin, a.scope))}  (in {tilde(cwd)})",
+          file=sys.stderr)
+    r = marketplace.install(claude_bin, a.plugin, a.scope, cwd)
+    if r.output:
+        print(r.output)
+    if r.ok:
+        print(f"installed {a.plugin} ({a.scope} scope); cm lists it under Plugins from the next start", file=sys.stderr)
+        return 0
+    _err(marketplace.advice(r))
+    return 1
+
+
+def build_skills_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="cm skills", description=f"Skill packs in {tilde(skillpacks.packs_dir())}: skills a session loads "
+                                      "only when you tick the pack (claude --plugin-dir).")
+    sub = p.add_subparsers(dest="what", required=True)
+    ls = sub.add_parser("list", help="list the skill packs")
+    ls.add_argument("--json", action="store_true")
+    add = sub.add_parser("add", help="create a pack from a folder of skills (copied, or symlinked with --link)")
+    add.add_argument("name", help="the pack's name: lowercase letters, digits and -")
+    add.add_argument("--from", dest="src", required=True, metavar="DIR",
+                     help="a skill folder (with SKILL.md), or a folder of them (or one with a skills/ folder)")
+    add.add_argument("--link", action="store_true", help="symlink the skill folders instead of copying them")
+    add.add_argument("--description", default="", help="shown on the screen")
+    add.add_argument("--requires", action="append", default=[], metavar="CMD[=INSTALL_HINT]",
+                     help="a command the skills need, e.g. 'playwright-cli=npm i -g @playwright/cli' (repeatable)")
+    rm = sub.add_parser("remove", help="delete a pack (asks first)")
+    rm.add_argument("name")
+    rm.add_argument("-y", "--yes", action="store_true", help="don't ask")
+    return p
+
+
+def _pack_json(pack: skillpacks.SkillPack) -> dict:
+    return {"name": pack.name, "path": str(pack.path), "description": pack.description,
+            "skills": [{"name": s.name, "description": s.description} for s in pack.skills],
+            "requires": [{"command": r.command, "install_hint": r.install_hint, "found": r.found}
+                         for r in pack.requires],
+            "estimated_tokens": pack.estimated_tokens(), "error": pack.error, "notes": pack.notes}
+
+
+def skills_main(argv: list[str]) -> int:
+    a = build_skills_parser().parse_args(argv)
+    if a.what == "list":
+        warnings: list[str] = []
+        packs = skillpacks.discover(warnings)
+        if a.json:
+            print(json.dumps({"dir": str(skillpacks.packs_dir()), "packs": [_pack_json(p) for p in packs],
+                              "warnings": warnings}, indent=2, ensure_ascii=False))
+            return 0
+        if not packs:
+            print(f"no skill packs in {tilde(skillpacks.packs_dir())} (cm skills add NAME --from DIR)",
+                  file=sys.stderr)
+        for pk in packs:
+            state = f"  ! {pk.error}" if pk.error else "".join(f"  · {w}" for w in pk.warnings())
+            desc = f"  {pk.description}" if pk.description else ""
+            print(f"{pk.name}  ({len(pk.skills)} skill{'s' if len(pk.skills) != 1 else ''}, "
+                  f"~{pk.estimated_tokens()} tok est.){desc}{state}")
+            for sk in pk.skills:
+                print(f"    {sk.name}" + (f": {recent.shorten(sk.description, 80)}" if sk.description else ""))
+        for w in warnings:
+            _err(f"warning: {w}")
+        return 0
+    if a.what == "add":
+        try:
+            reqs = [skillpacks.parse_requirement(r) for r in a.requires]
+            pack = skillpacks.add(a.name, Path(a.src).expanduser(), link=a.link, description=a.description.strip(),
+                                  requires=reqs)
+        except (skillpacks.PackError, OSError) as exc:
+            _err(str(exc))
+            return 2
+        how = "linked" if a.link else "copied"
+        print(f"skill pack {pack.name}: {len(pack.skills)} skill(s) {how} into {tilde(pack.path)}")
+        for w in pack.warnings():
+            print(f"  · {w}")
+        return 0
+    if why := skillpacks.valid_name(a.name):
+        _err(why)
+        return 2
+    path = skillpacks.packs_dir() / a.name
+    if not (path.is_dir() or path.is_symlink()):
+        _err(f"no skill pack named {a.name!r}")
+        return 2
+    if not a.yes:
+        if not _has_tty():
+            _err("not removing without confirmation: pass --yes")
+            return 2
+        try:
+            answer = input(f"delete skill pack {a.name} ({tilde(path)})? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("kept")
+            return 1
+    try:
+        skillpacks.remove(a.name)
+    except (skillpacks.PackError, OSError) as exc:
+        _err(str(exc))
+        return 1
+    print(f"removed skill pack {a.name}")
+    return 0
+
+
+SUBCOMMANDS = {"plugins": plugins_main, "skills": skills_main}
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     own, passthrough = _split_passthrough(raw)
     is_setup = own[:1] == ["setup"]
-    a = None if is_setup else build_parser().parse_args(own)
+    sub = own[0] if own[:1] and own[0] in SUBCOMMANDS else None
+    a = None if is_setup or sub else build_parser().parse_args(own)
     try:
         cfg_mod.migrate_legacy()
     except OSError as exc:
@@ -475,6 +741,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if is_setup:
         return setup_main(own[1:])
+    if sub:
+        return SUBCOMMANDS[sub](raw[1:])
     assert a is not None
     claude_bin = a.claude_bin or shutil.which("claude") or "claude"
     cwd = Path(a.cwd).resolve() if a.cwd else Path.cwd()
@@ -531,6 +799,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.name is not None and passthrough_name(passthrough):
         _err("the session is named twice (--name and a --name/-n after --); keep only one")
         return 2
+    if a.agent is not None and a.agent.strip().lower() not in ("", "default", "none") and passthrough_agent(passthrough):
+        _err("the agent is given twice (--agent and an --agent after --); keep only one")
+        return 2
     if a.tmux and a.worktree is None:
         _err("--tmux needs --worktree (claude's --tmux only works with -w)")
         return 2
@@ -581,10 +852,13 @@ def main(argv: list[str] | None = None) -> int:
     # The last selection: read only when the screen opens with no selection flags, written only
     # after the screen launched claude. Headless launches and --dry-run never touch it.
     remember_on = False
+    session_on = False  # remember the last session too (remember_last_session)
     last: remember.Entry | None = None
     last_notes: list[str] = []
     if screen:
-        remember_on = cfg_mod.remember_last(cfg_mod.load_config(), last_notes)
+        cfg = cfg_mod.load_config()
+        remember_on = cfg_mod.remember_last(cfg, last_notes)
+        session_on = remember_on and cfg_mod.remember_last_session(cfg, last_notes)
         if remember_on and not _selection_flags_given(a):
             last, warns = remember.load(cwd)
             last_notes += warns
@@ -603,17 +877,37 @@ def main(argv: list[str] | None = None) -> int:
         _err("--fork needs a session to fork: --resume <id> or --continue")
         return 2
 
+    # The session the screen starts on. Only when nothing chose one (no --continue / --resume, a
+    # profile's Continue counts) and the screen opens: headless launches keep New.
+    by_name: recent.RecentSession | None = None
+    last_found: recent.RecentSession | None = None
+    if screen and sel.session == "new" and not passthrough_session(sel.extra_args):
+        if a.name is not None:
+            # --name NAME: resume this project's session of that name, if there is one
+            by_name = recent.find_by_name(cwd, a.name)
+            if by_name:
+                sel.session, sel.resume_id = "resume", by_name.id
+        elif last and last.session and session_on:
+            last_found = recent.find(cwd, last.session.id)
+            if last_found:
+                sel.session, sel.resume_id = "resume", last_found.id
+            else:
+                notes.append(f"last session {last.session.label()!r} no longer exists; starting a new session")
+
     if screen:
         if not _has_tty():
             _err("no TTY for the interactive screen; pass selection flags (e.g. --mcp, --profile)")
             return 2
         from .tui import run_tui
 
-        prefill = f"Pre-filled from your last launch in {tilde(last.project)} (Ctrl+N clears)" if last else None
+        prefill = None
+        if last:
+            session_part = f" · last session: {last_found.name}" if last_found else ""
+            prefill = f"Pre-filled from your last launch in {tilde(last.project)}{session_part} (Ctrl+N clears)"
         chosen = run_tui(cat, sel, claude_bin=claude_bin,
                          profile=a.profile or (None if last else profiles.get_default()),
                          notes=last_notes + notes + cat.warnings, auto_refresh=connectors_stale(cat),
-                         prefill=prefill)
+                         prefill=prefill, last_session=last_found.id if last_found else None)
         if chosen is None:
             return 0
         sel = chosen
@@ -671,15 +965,26 @@ def main(argv: list[str] | None = None) -> int:
         for w in plan.warnings:
             _err(w)
     save_warnings: list[str] = []
-    launched_sel = sel
+    stored = Selection.from_dict({**sel.to_dict(), "extra_args": remembered_extra_args(sel.extra_args)})
+    titles = {s.id: s.title for s in (by_name, last_found) if s and s.title}
+    session = known_session(sel, titles) if session_on else None
+    started: list[bool] = []
 
     def remember_launch() -> None:  # runs once claude has started; never while it couldn't
-        if w := remember.save(cwd, launched_sel):
+        started.append(True)
+        if w := remember.save(cwd, stored, session):
             save_warnings.append(w)
 
     hook = {"on_started": remember_launch} if screen and remember_on else {}
+    # Not resuming a known id: note the project's session files now, and after claude exits take
+    # the one that appeared (cm passes no --session-id, which would break cmux restores).
+    before = recent.snapshot(session_places(cat.cwd, sel)) if hook and session_on and session is None else None
     try:
-        return launch(cat, sel, claude_bin=claude_bin, **hook)
+        rc = launch(cat, sel, claude_bin=claude_bin, **hook)
+        if started and before is not None and (found := session_from_diff(before, sel)):
+            if w := remember.save(cwd, stored, found):
+                save_warnings.append(w)
+        return rc
     except PlanError as exc:
         _err(str(exc))
         return 2

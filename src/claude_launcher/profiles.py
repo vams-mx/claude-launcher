@@ -96,6 +96,19 @@ def reconcile(sel: Selection, cat: Catalog) -> tuple[Selection, list[str]]:
     notes += [f"connector {m!r} no longer found" for m in miss]
     plugins, miss = cat.resolve_plugins(sel.plugins)
     notes += [f"plugin {m!r} not enabled/installed here" for m in miss]
+    packs, miss = cat.resolve_skill_packs(sel.skill_packs)
+    notes += [f"skill pack {m!r} no longer found" for m in miss]
+    agent = sel.agent if isinstance(sel.agent, str) and sel.agent.strip() else None
+    if agent and cat.agent(agent) is None:
+        notes.append(f"agent {agent!r} no longer found; using the default agent")
+        agent = None
+    elif agent and (ag := cat.agent(agent)) and ag.plugin_id:
+        if why := cat.agent_block(ag):
+            notes.append(f"{why}; using the default agent")
+            agent = None
+        elif ag.plugin_id not in plugins:
+            plugins = [p.id for p in cat.plugins if p.id in plugins or p.id == ag.plugin_id]
+            notes.append(f"agent {agent} comes with plugin {ag.plugin_id}: ticked it")
     cmux = sel.cmux and cat.cmux.available
     if sel.cmux and not cmux:
         notes.append("cmux is not installed here" if not cat.cmux.installed else f"cmux unavailable: {cat.cmux.reason}")
@@ -104,5 +117,5 @@ def reconcile(sel: Selection, cat: Catalog) -> tuple[Selection, list[str]]:
     if note:
         notes.append(note)
     out = Selection.from_dict({**sel.to_dict(), "local": local, "connectors": conns, "plugins": plugins, "cmux": cmux,
-                               "awake": awake})
+                               "awake": awake, "skill_packs": packs, "agent": agent})
     return out, notes

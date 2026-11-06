@@ -13,7 +13,7 @@ from . import sessions as sessions_mod
 from . import worktree as wt_mod
 from .catalog import Catalog
 from .paths import tilde
-from .plan import LaunchPlan, PlanError, Selection, build_plan, passthrough_name, session_name
+from .plan import LaunchPlan, PlanError, Selection, build_plan, passthrough_agent, passthrough_name, session_name
 from .redact import MASK, redact_mcp_doc, redact_settings, shell_join
 
 
@@ -48,7 +48,12 @@ def session_line(sel: Selection, titles: Mapping[str, str] | None = None) -> str
         name = session_name(sel)
     except PlanError:
         name = None
-    if name:
+    existing = (sel.session == "resume" and sel.resume_id and not sel.fork and name
+                and (title := titles.get(sel.resume_id)) and same_name(name, title))
+    if existing:
+        # resuming a session under the name it already has (e.g. `cm --name backoffice`)
+        line = f"{base} (existing session)" + (f' → "{name}"' if name != titles[sel.resume_id] else "")
+    elif name:
         line = f'{base} → "{name}"'
     elif passthrough_name(sel.extra_args):
         line = f"{base} (named by the arguments after --)"
@@ -61,6 +66,25 @@ def session_line(sel: Selection, titles: Mapping[str, str] | None = None) -> str
     return line
 
 
+def agent_line(cat: Catalog, sel: Selection) -> str:
+    if not sel.agent:
+        if passthrough_agent(sel.extra_args):
+            return "given by the arguments after --"
+        return f"default ({cat.settings_agent} from settings)" if cat.settings_agent else "default"
+    ag = cat.agent(sel.agent)
+    if ag is None:
+        return f"{sel.agent} (not found here)"
+    line = f"{ag.name} ({ag.source})"
+    if ag.plugin_id:
+        line += f" · needs plugin {ag.plugin_id}, enabled for this session"
+    return line
+
+
+def same_name(a: str, b: str) -> bool:
+    """Session names compared like `cm --name` finds a session: trimmed, case-insensitive."""
+    return " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
 def env_line(plan: LaunchPlan) -> str:
     return " ".join(f"{k}={MASK if k in plan.secret_env else v}" for k, v in plan.env_overrides.items())
 
@@ -68,11 +92,18 @@ def env_line(plan: LaunchPlan) -> str:
 def cost_summary(cat: Catalog, sel: Selection, costs: dict[str, costs_mod.Cost]) -> tuple[str, list[str]]:
     keys = costs_mod.selection_keys(cat, sel)
     tok, tools, missing = costs_mod.estimate(costs, keys)
+    # an unmeasured skill pack is estimated from its skills' descriptions instead
+    est = 0
+    for k in [k for k in missing if k.startswith("pack:")]:
+        if (pack := cat.skill_pack(k[len("pack:"):])) is not None:
+            est += pack.estimated_tokens()
+            missing.remove(k)
+    tok += est
     if not keys:
         return "+0 tokens · 0 tools (nothing selected)", []
     if len(missing) == len(keys):
         return "not measured yet", missing
-    s = f"~{tok:,} tokens · {tools} tools upfront (Tool Search)"
+    s = f"~{tok:,} tokens · {tools} tools upfront (Tool Search)" + (" (skill packs estimated)" if est else "")
     full = sum((costs[k].full_tokens or costs[k].tokens) for k in keys if k in costs)
     if full > tok:
         s += f" · up to ~{full:,} if every schema gets loaded"
@@ -122,6 +153,12 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
     enabled = [p for p, on in plan.settings_doc.get("enabledPlugins", {}).items() if on]
     t.append("Plugins: ", style="bold")
     t.append((", ".join(enabled) if enabled else "none (all disabled for this session)") + "\n")
+    if sel.skill_packs:
+        t.append("Skill packs: ", style="bold")
+        t.append(", ".join(f"{n} ({len(pk.skills)} skills)" if (pk := cat.skill_pack(n)) else n
+                           for n in sel.skill_packs) + " (this session only, --plugin-dir)\n")
+    t.append("Agent: ", style="bold")
+    t.append(agent_line(cat, sel) + "\n", style="" if sel.agent else "dim")
     hooks = sessions_mod.without_touch_hook(plan.settings_doc).get("hooks") or {}  # cm's own hook isn't news
     if hooks:
         t.append("Hooks added: ", style="bold")

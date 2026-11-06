@@ -21,6 +21,10 @@ Keys (all optional; keys starting with `_` are documentation and ignored):
   remember_last         true (default) / false: pre-fill the screen with the
                         selection last launched from it in this project
                         (remember.py); false turns reading and writing off.
+  remember_last_session true (default) / false: also remember the session
+                        last launched from the screen (new, resumed, continued
+                        or forked) and pre-select resuming it. Needs
+                        remember_last; false keeps the rest of the entry.
 
 Also: the one-time migration from the pre-0.2 home (~/.config/claude-launcher).
 """
@@ -62,9 +66,16 @@ COMMENT = [
     ("recent_sessions: how many of the current project's Claude Code sessions the screen's Recent selector and "
      "`cm --sessions` list (default 3, 0 hides the selector, max 50). Read-only from ~/.claude/projects."),
     ("remember_last: true (default) pre-fills the screen with what you last launched from it in the same project "
-     "(git root, else the directory): MCPs, connectors, plugins, cmux, model, keep awake (macOS); never Skip "
-     "permissions or the session. Stored per machine in last/. false turns it off (nothing read or written); `cm --forget-last` "
-     "forgets one project."),
+     "(git root, else the directory): MCPs, connectors, plugins, skill packs, cmux, model, agent, keep awake "
+     "(macOS), the extra args after --; never Skip "
+     "permissions, Fork, Worktree or tmux. Stored per machine in last/. false turns it off (nothing read or written); "
+     "`cm --forget-last` forgets one project."),
+    ("remember_last_session: true (default) also remembers the session you last launched from the screen (new, "
+     "resumed, continued or forked; its id and name; a new one is the single transcript file that appeared while "
+     "claude ran, cm never passes --session-id) and pre-selects resuming that session next time (Ctrl+N or New "
+     "starts a new one). false remembers no session."),
+    ("Skill packs live in skills/<pack>/ next to this file (cm skills add/list/remove); Ctrl+O on the screen or "
+     "`cm plugins install` installs a plugin through `claude plugin install`."),
     f"Docs: {DOCS_URL}",
 ]
 
@@ -156,6 +167,17 @@ def remember_last(cfg: dict[str, Any] | None = None, warnings: list[str] | None 
         return raw
     if warnings is not None:
         warnings.append(f"config.json: remember_last must be true or false, not {raw!r}; using true")
+    return True
+
+
+def remember_last_session(cfg: dict[str, Any] | None = None, warnings: list[str] | None = None) -> bool:
+    """`remember_last_session`: true (default) or false. Anything else warns and uses true."""
+    cfg = load_config() if cfg is None else cfg
+    raw = cfg.get("remember_last_session", True)
+    if isinstance(raw, bool):
+        return raw
+    if warnings is not None:
+        warnings.append(f"config.json: remember_last_session must be true or false, not {raw!r}; using true")
     return True
 
 
