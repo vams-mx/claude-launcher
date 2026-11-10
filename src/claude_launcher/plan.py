@@ -71,6 +71,7 @@ class Selection:
     worktree: str | None = None  # -w <name>: start in a new (or that) git worktree; None = off
     tmux: bool = False  # --tmux (only together with -w)
     launch_dir: str | None = None  # start claude here instead of the catalog's cwd (a worktree's session)
+    session_agent: str | None = None  # the agent the resumed / continued session runs (claude restores it)
     # keep the Mac awake while claude runs: "off" | "ims" | "dims" (awake.py; macOS only, ignored elsewhere).
     # A launch preference like the model: stored in profiles and the remembered last selection.
     awake: str = "off"
@@ -111,7 +112,7 @@ class PlanError(ValueError):
 
 
 # Per-launch values: never stored in a profile (nor in the remembered last selection).
-LAUNCH_ONLY = ("resume_id", "fork", "name", "worktree", "tmux", "launch_dir")
+LAUNCH_ONLY = ("resume_id", "fork", "name", "worktree", "tmux", "launch_dir", "session_agent")
 AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -303,13 +304,16 @@ def build_plan(
     # The Default agent (no --agent) is the `agent` setting. When it comes with a plugin, that plugin
     # must stay enabled even if it isn't ticked, or claude starts with an agent it can't find
     # ("--agent '<plugin>:<agent>' not found").
+    # A resumed / continued session brings back its own agent, which wins over the setting.
     default_plugin: str | None = None
-    if not sel.agent and cat.settings_agent and (dflt := cat.agent(cat.settings_agent)) and dflt.plugin_id:
+    implied, source = ((sel.session_agent, "the resumed session") if sel.session_agent and sel.session != "new"
+                       else (cat.settings_agent, "settings"))
+    if not sel.agent and implied and (dflt := cat.agent(implied)) and dflt.plugin_id:
         if why := cat.agent_block(dflt):
-            warnings.append(f"default agent from settings: {why}")
+            warnings.append(f"agent {dflt.name} from {source}: {why}")
         elif dflt.plugin_id not in sel.plugins:
             default_plugin = dflt.plugin_id
-            warnings.append(f"default agent {dflt.name} (from settings) comes with plugin {dflt.plugin_id}: "
+            warnings.append(f"agent {dflt.name} (from {source}) comes with plugin {dflt.plugin_id}: "
                             "kept it enabled for this session")
     enabled_plugins = [*sel.plugins, *([default_plugin] if default_plugin else [])]
     plugin_mcp = [s for pid in enabled_plugins for s in ((cat.plugin(pid).mcp_servers if cat.plugin(pid) else []))]

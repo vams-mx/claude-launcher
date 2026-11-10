@@ -83,6 +83,9 @@ class RecentSession:
     # kept even after the session left the worktree (Claude then records `worktreeSession: null`,
     # and a plain resume starts in the main checkout). Internal, like last_cwd.
     worktree_path: str | None = None
+    # The agent the session runs (Claude's last `agent-setting` record): claude restores it on
+    # --resume / --continue, so its plugin must stay enabled. Internal, like last_cwd.
+    agent: str | None = None
 
     @property
     def custom(self) -> bool:
@@ -245,6 +248,7 @@ class _Scan:
         self.known = False
         self.last_cwd: str | None = None  # `cwd` of the last main-conversation record in the window
         self.worktree_path: str | None = None  # last non-null worktreeSession.worktreePath in the window
+        self.agent: str | None = None  # last agent-setting in the window ("" = set back to the default)
 
     def feed(self, recs: list[dict[str, Any]]) -> None:
         """Records in file order: later titles win, the first prompt is kept."""
@@ -266,6 +270,9 @@ class _Scan:
                 self.main = True
                 if self.prompt is None:
                     self.prompt = prompt
+            elif t == "agent-setting":
+                v = rec.get("agentSetting")
+                self.agent = v.strip() if isinstance(v, str) else ""
             elif t == "custom-title" and isinstance(rec.get("customTitle"), str):
                 self.custom = rec["customTitle"].strip()
             elif t == "ai-title" and isinstance(rec.get("aiTitle"), str) and rec["aiTitle"].strip():
@@ -334,7 +341,8 @@ def read_session(path: Path, *, want_worktree: bool = False) -> RecentSession | 
     when = tail.last_ts or head.last_ts or datetime.fromtimestamp(st.st_mtime, timezone.utc)
     return RecentSession(id=sid, name=name, source=source, last_activity=when,
                          last_cwd=tail.last_cwd or head.last_cwd,
-                         worktree_path=tail.worktree_path or head.worktree_path)
+                         worktree_path=tail.worktree_path or head.worktree_path,
+                         agent=(tail.agent if tail.agent is not None else head.agent) or None)
 
 
 @dataclass(frozen=True)

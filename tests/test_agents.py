@@ -243,4 +243,44 @@ def test_a_default_agent_whose_plugin_is_not_here_warns(agents):
     _w(agents.project / ".claude" / "settings.local.json", {"agent": "team:coordinator"})
     cat = discover(agents.project)
     plan = build_plan(cat, Selection(), claude_bin="claude")
-    assert any("default agent from settings" in w and "another project" in w for w in plan.warnings)
+    assert any("from settings" in w and "another project" in w for w in plan.warnings)
+
+
+def test_a_resumed_sessions_agent_keeps_its_plugin_enabled(agents):
+    # regression: claude restores a session's agent (its `agent-setting` record) on --resume; when that
+    # agent comes with a plugin cm hadn't ticked, claude said "--agent '<plugin>:<agent>' not found"
+    from claude_launcher import recent
+    from tests.conftest import rec_assistant, rec_user, write_session
+
+    write_session(agents.project, SID[0], [{"type": "agent-setting", "agentSetting": "commit-commands:helper",
+                                            "sessionId": "s"}, rec_user("hi", 1), rec_assistant(1)])
+    found = recent.find(agents.project, SID[0])
+    assert found and found.agent == "commit-commands:helper"
+    cat = discover(agents.project)
+    sel = Selection(session="resume", resume_id=SID[0])
+    cli.finish_session(agents.project, sel)
+    assert sel.session_agent == "commit-commands:helper"
+    plan = build_plan(cat, sel, claude_bin="claude")
+    assert plan.settings_doc["enabledPlugins"]["commit-commands@official"] is True
+    assert any("the resumed session" in w for w in plan.warnings)
+    from claude_launcher.preview import agent_line
+    assert agent_line(cat, sel) == "commit-commands:helper (restored by the resumed session)"
+    # never stored: not in profiles / the last selection
+    from claude_launcher.plan import LAUNCH_ONLY
+    assert "session_agent" in LAUNCH_ONLY  # profiles strip it; remember-last never saves it
+    # an explicit agent wins; a new session ignores the old session's agent
+    assert build_plan(cat, Selection(session="resume", resume_id=SID[0], session_agent="commit-commands:helper",
+                                     agent="reviewer"), claude_bin="claude"
+                      ).settings_doc["enabledPlugins"]["commit-commands@official"] is False
+    assert build_plan(cat, Selection(session_agent="commit-commands:helper"), claude_bin="claude"
+                      ).settings_doc["enabledPlugins"]["commit-commands@official"] is False
+
+
+def test_an_agent_set_back_to_default_in_the_session_is_none(agents):
+    from claude_launcher import recent
+    from tests.conftest import rec_assistant, rec_user, write_session
+
+    write_session(agents.project, SID[1], [{"type": "agent-setting", "agentSetting": "commit-commands:helper"},
+                                           rec_user("hi", 1), {"type": "agent-setting", "agentSetting": None},
+                                           rec_assistant(1)])
+    assert recent.find(agents.project, SID[1]).agent is None

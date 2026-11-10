@@ -260,10 +260,16 @@ def finish_session(cwd: Path, sel: Selection, *, headless: bool = False) -> list
     one where claude would replace something (reset a leftover branch, recreate a broken
     worktree) is refused instead (PlanError); the screen has already asked for a second Enter."""
     notes: list[str] = []
-    if sel.session == "resume" and sel.resume_id and not sel.launch_dir:
+    if sel.session == "resume" and sel.resume_id:
         found = recent.find(cwd, sel.resume_id)
-        if found and found.cwd:
+        if found and found.cwd and not sel.launch_dir:
             sel.launch_dir = found.cwd
+        if found and not sel.session_agent:
+            sel.session_agent = found.agent
+    elif sel.session == "continue" and not sel.session_agent:
+        # --continue picks this directory's newest session
+        newest = recent.list_recent(cwd, 1, worktrees=False).sessions
+        sel.session_agent = newest[0].agent if newest else None
     if sel.worktree is None:
         return notes
     if sel.worktree == "":

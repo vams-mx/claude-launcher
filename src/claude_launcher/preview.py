@@ -70,6 +70,8 @@ def agent_line(cat: Catalog, sel: Selection) -> str:
     if not sel.agent:
         if passthrough_agent(sel.extra_args):
             return "given by the arguments after --"
+        if sel.session_agent and sel.session != "new":
+            return f"{sel.session_agent} (restored by the resumed session)"
         return f"default ({cat.settings_agent} from settings)" if cat.settings_agent else "default"
     ag = cat.agent(sel.agent)
     if ag is None:

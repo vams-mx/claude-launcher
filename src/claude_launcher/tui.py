@@ -681,8 +681,13 @@ class LauncherApp(App[tuple[str, Selection] | None]):
         )
         # a ticked Fork only counts while there is something to fork (it is greyed out otherwise)
         sel.fork = self.query_one("#fork", Checkbox).value and can_fork(sel)
-        if sel.session == "resume" and sel.resume_id and (s := self.known.get(sel.resume_id)) and s.cwd:
-            sel.launch_dir = s.cwd  # a session of another checkout resumes from there
+        if sel.session == "resume" and sel.resume_id and (s := self.known.get(sel.resume_id)):
+            if s.cwd:
+                sel.launch_dir = s.cwd  # a session of another checkout resumes from there
+            sel.session_agent = s.agent  # claude restores the session's agent: keep its plugin enabled
+        elif sel.session == "continue":
+            own = [s for s in self.known.values() if not s.worktree]
+            sel.session_agent = max(own, key=lambda s: s.last_activity).agent if own else None
         # likewise Worktree and tmux only count while they are enabled
         if self.query_one("#worktree", Checkbox).value and self._worktree_block(sel) is None:
             sel.worktree = self.query_one("#worktree_name", Input).value.strip()
