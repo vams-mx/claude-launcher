@@ -459,6 +459,7 @@ Names that were connected once but are missing from the latest refresh are hidde
 cm lists plugins that are enabled in `~/.claude/settings.json` or the project's `.claude/settings{,.local}.json` and installed according to `~/.claude/plugins/installed_plugins.json`. Each launch sets every known plugin explicitly to on or off in the session's `enabledPlugins`, which overrides user, project and local scope.
 
 * A plugin that isn't installed for the current scope can't be turned on this way.
+* **Dependencies stay on.** A plugin's `.claude-plugin/plugin.json` can declare `dependencies` (`"name"`, `"name@marketplace"` or `{"name", "marketplace"}`), and Claude Code doesn't load a plugin whose dependency is disabled: its agents are *not found*, and a Default agent from settings is silently dropped. So every dependency of a ticked plugin (or of the Default agent's plugin) is enabled for the session too, transitively, even one that is in no settings file (an auto-installed dependency); the preview says *plugin X needs plugin Y: kept it enabled*. A dependency not installed for this project is reported, since Claude then won't load the plugin that needs it.
 * `--strict-mcp-config` drops plugin-bundled MCP servers, so cm switches to deny-list mode when you select a plugin that bundles MCP servers.
 * Built-in plugins (`*@builtin`) can't be disabled per session.
 

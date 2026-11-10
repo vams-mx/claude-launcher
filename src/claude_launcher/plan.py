@@ -315,8 +315,13 @@ def build_plan(
             default_plugin = dflt.plugin_id
             warnings.append(f"agent {dflt.name} (from {source}) comes with plugin {dflt.plugin_id}: "
                             "kept it enabled for this session")
-    enabled_plugins = [*sel.plugins, *([default_plugin] if default_plugin else [])]
-    plugin_mcp = [s for pid in enabled_plugins for s in ((cat.plugin(pid).mcp_servers if cat.plugin(pid) else []))]
+    # A plugin whose dependency is disabled doesn't load at all (Claude Code 2.1.32x), so the
+    # dependencies of everything enabled stay enabled too (e.g. basic-ops-team -> aws-write-guard).
+    enabled_plugins, brought, dep_problems = cat.with_dependencies(
+        [*sel.plugins, *([default_plugin] if default_plugin else [])])
+    warnings += [f"plugin {pid} needs plugin {dep}: kept it enabled for this session" for pid, dep in brought]
+    warnings += dep_problems
+    plugin_mcp = [s for pid in enabled_plugins for s in cat.plugin_mcp(pid)]
     mode = "denylist" if (sel.connectors or plugin_mcp) else "strict"
 
     # --- plugins ------------------------------------------------------------
@@ -343,6 +348,7 @@ def build_plan(
         packs.append(pack)
         warnings += [f"skill pack {name}: {w}" for w in pack.warnings()]
     settings["enabledPlugins"] = {p.id: (p.id in enabled_plugins) for p in cat.plugins}
+    settings["enabledPlugins"].update({pid: True for pid in enabled_plugins if cat.plugin(pid) is None})
 
     selected_names = list(servers) + list(sel.connectors) + plugin_mcp
     denied: list[str] = []

@@ -284,3 +284,76 @@ def test_an_agent_set_back_to_default_in_the_session_is_none(agents):
                                            rec_user("hi", 1), {"type": "agent-setting", "agentSetting": None},
                                            rec_assistant(1)])
     assert recent.find(agents.project, SID[1]).agent is None
+
+
+def _deps(home, plugin_dir, deps):
+    _w(home / "plug" / plugin_dir / ".claude-plugin" / "plugin.json", {"name": plugin_dir, "dependencies": deps})
+
+
+def test_plugin_dependency_formats(fake_home):
+    from claude_launcher.catalog import plugin_dependencies
+    h = fake_home.home
+    _deps(h, "commit", ["a", "b@other", {"name": "c"}, {"name": "d", "marketplace": "m2"}, {"name": " "}, 3,
+                        "a", "commit-commands@official"])
+    assert plugin_dependencies("commit-commands@official", h / "plug" / "commit") == [
+        "a@official", "b@other", "c@official", "d@m2"]  # duplicates, junk and itself dropped
+    _deps(h, "commit", {"a": "*"})  # not a list: Claude refuses it too
+    assert plugin_dependencies("commit-commands@official", h / "plug" / "commit") == []
+    assert plugin_dependencies("x@y", None) == [] and plugin_dependencies("x@y", h / "missing") == []
+
+
+def test_a_plugins_dependencies_stay_enabled(fake_home):
+    # regression (Claude Code 2.1.322): basic-ops-team depends on aws-write-guard; cm disabled the
+    # unticked aws-write-guard, so claude didn't load basic-ops-team: "--agent 'basic-ops-team:operator'
+    # not found", and with the Default agent the session silently ran without it
+    h = fake_home.home
+    _deps(h, "commit", ["prompt-tools@market"])
+    _deps(h, "prompt", ["dbtools@x"])  # transitive
+    cat = discover(fake_home.project)
+    plan = build_plan(cat, Selection(plugins=["commit-commands@official"]), claude_bin="claude")
+    ep = plan.settings_doc["enabledPlugins"]
+    assert ep["commit-commands@official"] and ep["prompt-tools@market"] and ep["dbtools@x"]
+    assert "plugin commit-commands@official needs plugin prompt-tools@market: kept it enabled for this session" \
+        in plan.warnings
+    assert any("needs plugin dbtools@x" in w for w in plan.warnings)
+    assert "plugin:dbtools:db" not in plan.mcp_doc["mcpServers"]  # plugin MCP is Claude's, never in mcp.json
+    # nothing ticked: nothing forced on
+    assert not any(build_plan(cat, Selection(), claude_bin="claude").settings_doc["enabledPlugins"].values())
+
+
+def test_a_dependency_enabled_nowhere_is_still_turned_on_and_one_not_installed_warns(fake_home):
+    h = fake_home.home
+    ip = h / ".claude" / "plugins" / "installed_plugins.json"
+    doc = json.loads(ip.read_text())
+    doc["plugins"]["guard@official"] = [{"scope": "user", "installPath": str(h / "plug" / "guard"), "auto": True}]
+    ip.write_text(json.dumps(doc))
+    _deps(h, "commit", ["guard", "ghost@official"])
+    _w(h / "plug" / "guard" / ".mcp.json", {"mcpServers": {"g": {"command": "g"}}})
+    cat = discover(fake_home.project)
+    assert cat.plugin("guard@official") is None  # auto-installed, in no settings file
+    plan = build_plan(cat, Selection(plugins=["commit-commands@official"]), claude_bin="claude")
+    ep = plan.settings_doc["enabledPlugins"]
+    assert ep["guard@official"] is True and ep["ghost@official"] is True
+    # its MCP server isn't denied
+    assert not any(d.get("serverName") == "plugin:guard:g" for d in plan.settings_doc.get("deniedMcpServers", []))
+    assert any("ghost@official, which isn't installed for this project" in w for w in plan.warnings)
+    assert not any("guard@official, which isn't installed" in w for w in plan.warnings)
+
+
+def test_the_default_agents_plugin_brings_its_dependencies(agents):
+    _w(agents.project / ".claude" / "settings.local.json",
+       {"enabledPlugins": {"commit-commands@official": True}, "agent": "commit-commands:helper"})
+    _deps(agents.home, "commit", ["prompt-tools@market"])
+    cat = discover(agents.project)
+    plan = build_plan(cat, Selection(plugins=[]), claude_bin="claude")
+    ep = plan.settings_doc["enabledPlugins"]
+    assert ep["commit-commands@official"] is True and ep["prompt-tools@market"] is True
+
+
+def test_a_dependency_cycle_ends(fake_home):
+    h = fake_home.home
+    _deps(h, "commit", ["prompt-tools@market"])
+    _deps(h, "prompt", ["commit-commands@official"])
+    cat = discover(fake_home.project)
+    enabled, brought, problems = cat.with_dependencies(["commit-commands@official"])
+    assert enabled == ["commit-commands@official", "prompt-tools@market"] and len(brought) == 1 and not problems

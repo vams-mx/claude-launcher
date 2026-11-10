@@ -101,6 +101,7 @@ class Plugin:
     install_path: Path | None = None
     mcp_servers: list[str] = field(default_factory=list)  # plugin:<name>:<server>
     installed_here: bool = True  # installed for the user, or for this project (project/local scope)
+    dependencies: list[str] = field(default_factory=list)  # plugin.json `dependencies`, as name@marketplace
 
     @property
     def name(self) -> str:
@@ -179,6 +180,43 @@ class Catalog:
 
     def plugin(self, pid: str) -> Plugin | None:
         return next((p for p in self.plugins if p.id == pid), None)
+
+    def _installed(self, pid: str) -> tuple[Path | None, bool]:
+        """(install path, installed here) of a plugin that may not be enabled in any settings file."""
+        entries = installed_plugins().get(pid) or []
+        here = entry_here(entries, self.cwd)
+        e = here or (entries[0] if entries else None)
+        path = Path(e["installPath"]) if e and isinstance(e.get("installPath"), str) else None
+        return path, here is not None
+
+    def with_dependencies(self, pids: list[str]) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+        """`pids` plus every plugin they depend on, transitively.
+
+        Returns (all plugin ids, [(plugin, dependency it brought)], problems): a dependency that
+        isn't installed here can't be loaded, and then neither can the plugin that needs it."""
+        out = list(dict.fromkeys(pids))
+        added: list[tuple[str, str]] = []
+        problems: list[str] = []
+        i = 0
+        while i < len(out) and i < 200:  # a cycle or a huge graph can't loop forever
+            pid = out[i]
+            i += 1
+            p = self.plugin(pid)
+            deps = p.dependencies if p is not None else plugin_dependencies(pid, self._installed(pid)[0])
+            for dep in deps:
+                if dep in out:
+                    continue
+                out.append(dep)
+                added.append((pid, dep))
+                known = self.plugin(dep)
+                if not (known.installed_here if known is not None else self._installed(dep)[1]):
+                    problems.append(f"plugin {pid} needs plugin {dep}, which isn't installed for this project: "
+                                    f"claude won't load {pid} (claude plugin install {dep})")
+        return out, added, problems
+
+    def plugin_mcp(self, pid: str) -> list[str]:
+        p = self.plugin(pid)
+        return p.mcp_servers if p is not None else _plugin_mcp_servers(pid, self._installed(pid)[0])
 
     def agent(self, name: str | None) -> Agent | None:
         return next((a for a in self.agents if a.name == name), None) if name else None
@@ -448,7 +486,8 @@ def discover_plugins(cwd: Path, warnings: list[str]) -> list[Plugin]:
         if path is None and entries and isinstance(entries[0].get("installPath"), str):
             path = Path(entries[0]["installPath"])
         plugins.append(Plugin(pid, state.get(pid, []), path, _plugin_mcp_servers(pid, path),
-                              installed_here=here is not None or not entries))
+                              installed_here=here is not None or not entries,
+                              dependencies=plugin_dependencies(pid, path)))
     return sorted(plugins, key=lambda p: p.id)
 
 
@@ -512,6 +551,35 @@ def discover_agents(cwd: Path, warnings: list[str] | None = None) -> tuple[list[
         if isinstance(v, str) and v.strip():
             setting = v.strip()
     return list(agents.values()), setting
+
+
+def plugin_dependencies(pid: str, path: Path | None) -> list[str]:
+    """The plugins `pid` declares in its plugin.json `dependencies`, as name@marketplace.
+
+    Claude Code accepts "name" (the plugin's own marketplace), "name@marketplace" and
+    {"name": ..., "marketplace": ...}. It doesn't load a plugin whose dependency is disabled
+    (its agents are then "not found"), so cm keeps the dependencies of what it enables on."""
+    if not path:
+        return []
+    doc = _read_json(path / ".claude-plugin" / "plugin.json")
+    deps = doc.get("dependencies") if isinstance(doc, dict) else None
+    if not isinstance(deps, list):
+        return []
+    own = pid.split("@", 1)[1] if "@" in pid else ""
+    out: list[str] = []
+    for d in deps:
+        name, market = (d.get("name"), d.get("marketplace")) if isinstance(d, dict) else (d, None)
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        if "@" not in name:
+            market = market.strip() if isinstance(market, str) and market.strip() else own
+            if not market:
+                continue
+            name = f"{name}@{market}"
+        if name != pid and name not in out:
+            out.append(name)
+    return out
 
 
 def _plugin_mcp_servers(pid: str, path: Path | None) -> list[str]:
