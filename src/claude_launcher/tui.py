@@ -35,7 +35,7 @@ any, applies and is named) or one of the agents catalog.py found. A plugin's
 agent ticks its plugin (the preview says so); one whose plugin isn't
 installed for this project blocks Enter with the reason.
 
-Skill packs (left, below Plugins): skillpacks.py's packs, one --plugin-dir
+Skill packs (left, below Plugins): skillpacks.py's packs, one --add-dir
 each; a missing required command is shown on the row and warned about in the
 preview, never blocking.
 

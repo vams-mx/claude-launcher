@@ -158,7 +158,7 @@ def render(cat: Catalog, sel: Selection, plan: LaunchPlan, costs: dict[str, cost
     if sel.skill_packs:
         t.append("Skill packs: ", style="bold")
         t.append(", ".join(f"{n} ({len(pk.skills)} skills)" if (pk := cat.skill_pack(n)) else n
-                           for n in sel.skill_packs) + " (this session only, --plugin-dir)\n")
+                           for n in sel.skill_packs) + " (this session only, --add-dir)\n")
     t.append("Agent: ", style="bold")
     t.append(agent_line(cat, sel) + "\n", style="" if sel.agent else "dim")
     hooks = sessions_mod.without_touch_hook(plan.settings_doc).get("hooks") or {}  # cm's own hook isn't news

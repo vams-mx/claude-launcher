@@ -14,7 +14,7 @@
   cm --sessions [N] [--json]      this project's recent Claude Code sessions (id, name, age)
   cm --awake ims|dims|off         macOS: keep the Mac awake while claude runs (caffeinate -w <claude pid>)
   cm --agent NAME                 the session's agent (claude --agent), e.g. a plugin's "team:coordinator"
-  cm --skill-packs playwright     skill packs for this session only (--plugin-dir each)
+  cm --skill-packs playwright     skill packs for this session only (--add-dir each)
   cm ... -- <args forwarded verbatim to claude>
   cm setup init                   create ~/.claude-launcher (example config.json, mcps/)
   cm setup agentmemory            install and wire up AgentMemory (opt-in, asks first)
@@ -640,7 +640,7 @@ def plugins_main(argv: list[str]) -> int:
 def build_skills_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cm skills", description=f"Skill packs in {tilde(skillpacks.packs_dir())}: skills a session loads "
-                                      "only when you tick the pack (claude --plugin-dir).")
+                                      "only when you tick the pack (claude --add-dir).")
     sub = p.add_subparsers(dest="what", required=True)
     ls = sub.add_parser("list", help="list the skill packs")
     ls.add_argument("--json", action="store_true")

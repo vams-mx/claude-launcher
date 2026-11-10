@@ -18,7 +18,7 @@ denylist  At least one claude.ai connector selected (or a selected plugin
           that appears after discovery (e.g. a brand-new connector before
           `cm --refresh`) could slip through, which the UI says.
 
-Agent (`--agent <name>`) and skill packs (`--plugin-dir <pack>` each, session
+Agent (`--agent <name>`) and skill packs (`--add-dir <pack>` each, session
 only: skillpacks.py) go before the forwarded args; `--resume` stays last. cm
 never passes `--session-id` (a cmux restore appends `--resume <id>`, which
 claude refuses next to it); cli.py finds a new session's id afterwards.
@@ -79,7 +79,7 @@ class Selection:
     # --agent <name>: the session's main agent (catalog.Agent); None = claude's default (the `agent`
     # setting, if any). A preference like the model: stored in profiles and the last selection.
     agent: str | None = None
-    # skill packs (skillpacks.py) loaded for this session only, one --plugin-dir each
+    # skill packs (skillpacks.py) loaded for this session only, one --add-dir each
     skill_packs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -385,7 +385,9 @@ def build_plan(
     if sel.agent:
         argv += ["--agent", sel.agent]
     for pack in packs:
-        argv += ["--plugin-dir", str(pack.path)]  # session only: nothing is installed
+        # session only, nothing installed. Not --plugin-dir: newer Claude Code versions then stop
+        # loading the installed plugins (their agents, e.g. basic-ops-team:operator, go missing)
+        argv += ["--add-dir", str(pack.path)]
     argv += list(sel.extra_args)
     if sel.fork:
         argv.append("--fork-session")

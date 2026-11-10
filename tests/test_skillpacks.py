@@ -1,4 +1,4 @@
-"""Skill packs: per-session skills via --plugin-dir. Discovery, argv, manifests, `cm skills`,
+"""Skill packs: per-session skills via --add-dir. Discovery, argv, the layout move, `cm skills`,
 profiles / last selection, costs and the screen. Fake HOME only; nothing real is installed."""
 
 import json
@@ -30,15 +30,18 @@ def skill(d, name, description="Does a thing"):
 def packs(fake_home, monkeypatch):
     root = skillpacks.packs_dir()
     pw = root / "playwright"
-    skill(pw / "skills" / "playwright-cli", "playwright-cli", "Drive a browser with playwright-cli")
+    skill(pw / ".claude" / "skills" / "playwright-cli", "playwright-cli", "Drive a browser with playwright-cli")
     (pw / "pack.json").write_text(json.dumps({"description": "Browser automation", "requires": [
         {"command": "playwright-cli", "install_hint": "npm i -g @playwright/cli"}, {"command": "sh"},
         {"command": "rm -rf /"}]}))
     docs = root / "docs"
+    # a pack made by cm 0.5.0-0.5.2: skills/ (the plugin layout), moved to .claude/skills at launch
     skill(docs / "skills" / "a", "alpha", "First")
     skill(docs / "skills" / "b", "beta", None)  # no description: a note
     (docs / "skills" / "not-a-skill").mkdir()
-    bad = root / "broken"
+    (docs / ".claude-plugin").mkdir()
+    (docs / ".claude-plugin" / "plugin.json").write_text('{"name": "docs", "description": "Old docs pack"}')
+    bad = root / "broken"  # no skills at all (and an unreadable old manifest, now ignored)
     (bad / ".claude-plugin").mkdir(parents=True)
     (bad / ".claude-plugin" / "plugin.json").write_text("{nope")
     (root / "Bad Name").mkdir()
@@ -60,7 +63,8 @@ def test_discovery(packs):
     assert pw.estimated_tokens() > 0
     d = found["docs"]
     assert [s.name for s in d.skills] == ["alpha", "beta"] and any("beta has no description" in n for n in d.notes)
-    assert found["broken"].error and "can't be read" in found["broken"].error
+    assert d.legacy and d.description == "Old docs pack" and not pw.legacy
+    assert found["broken"].error and "no skills found" in found["broken"].error
 
 
 def test_argv_and_rules(packs):
@@ -68,8 +72,9 @@ def test_argv_and_rules(packs):
     a = build_plan(cat, Selection(skill_packs=["playwright", "docs"], session="resume", resume_id=SID[0],
                                   extra_args=["--verbose"]), claude_bin="claude").argv
     root = skillpacks.packs_dir()
-    i = a.index("--plugin-dir")
-    assert a[i:i + 4] == ["--plugin-dir", str(root / "playwright"), "--plugin-dir", str(root / "docs")]
+    assert "--plugin-dir" not in a  # it makes newer Claude Code drop the installed plugins
+    i = a.index("--add-dir")
+    assert a[i:i + 4] == ["--add-dir", str(root / "playwright"), "--add-dir", str(root / "docs")]
     assert a.index("--verbose") > i and a[-2:] == ["--resume", SID[0]]
     plan = preview_plan(cat, Selection(skill_packs=["playwright"]), "claude")
     assert plan.mode == "strict"  # a pack has no MCP servers: strict mode stays
@@ -80,24 +85,22 @@ def test_argv_and_rules(packs):
         build_plan(cat, Selection(skill_packs=["broken"]), claude_bin="claude")
 
 
-def test_launch_writes_a_missing_manifest_only(packs, fake_popen):
+def test_launch_moves_an_old_packs_skills_to_claude_skills(packs, fake_popen):
     cat = discover(packs.project)
     popen = fake_popen()
-    launcher.launch(cat, Selection(skill_packs=["playwright"]), claude_bin="claude", popen=popen)
-    m = skillpacks.packs_dir() / "playwright" / ".claude-plugin" / "plugin.json"
-    doc = json.loads(m.read_text())
-    assert doc["name"] == "playwright" and doc["description"] == "Browser automation"
-    assert doc["version"] and doc["author"]  # what `claude plugin validate` warns about otherwise
-    m.write_text(json.dumps({"name": "playwright", "description": "mine"}))
-    launcher.launch(discover(packs.project), Selection(skill_packs=["playwright"]), claude_bin="claude", popen=popen)
-    assert json.loads(m.read_text())["description"] == "mine"  # kept as it is
-    assert "--plugin-dir" in popen.calls[-1].argv
+    launcher.launch(cat, Selection(skill_packs=["docs", "playwright"]), claude_bin="claude", popen=popen)
+    docs = skillpacks.packs_dir() / "docs"
+    assert (docs / ".claude" / "skills" / "a" / "SKILL.md").is_file() and not (docs / "skills").exists()
+    assert not (skillpacks.packs_dir() / "playwright" / ".claude-plugin").exists()  # nothing written for a new pack
+    again = {p.name: p for p in skillpacks.discover()}["docs"]
+    assert not again.legacy and [s.name for s in again.skills] == ["alpha", "beta"]
+    assert "--add-dir" in popen.calls[-1].argv
 
 
 def test_cli_skill_packs_flag(packs, capsys):
     assert cli.main(["--claude-bin", "claude", "--skill-packs", "docs", "--dry-run", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["argv"][doc["argv"].index("--plugin-dir") + 1].endswith("/skills/docs")
+    assert doc["argv"][doc["argv"].index("--add-dir") + 1].endswith("/skills/docs")
     assert cli.main(["--claude-bin", "claude", "--skill-packs", "ghost", "--dry-run"]) == 2
     assert "unknown skill pack(s): ghost" in capsys.readouterr().err
 
@@ -139,11 +142,11 @@ def test_skills_add_list_remove(fake_home, capsys, monkeypatch):
     assert skills("add", "playwright", "--from", str(src), "--requires",
                   "playwright-cli=npm i -g @playwright/cli", "--description", "Browser automation") == 0
     pack = skillpacks.packs_dir() / "playwright"
-    assert sorted(p.name for p in (pack / "skills").iterdir()) == ["other", "playwright-cli"]
-    assert not (pack / "skills" / "other").is_symlink()
+    assert sorted(p.name for p in (pack / ".claude" / "skills").iterdir()) == ["other", "playwright-cli"]
+    assert not (pack / ".claude" / "skills" / "other").is_symlink()
     assert json.loads((pack / "pack.json").read_text()) == {"description": "Browser automation", "requires": [
         {"command": "playwright-cli", "install_hint": "npm i -g @playwright/cli"}]}
-    assert json.loads((pack / ".claude-plugin" / "plugin.json").read_text())["name"] == "playwright"
+    assert not (pack / ".claude-plugin").exists() and not (pack / "skills").exists()
     capsys.readouterr()
 
     assert skills("add", "playwright", "--from", str(src)) == 2
@@ -154,7 +157,7 @@ def test_skills_add_list_remove(fake_home, capsys, monkeypatch):
 
     one = skill(fake_home.tmp / "single", "solo", "Solo skill")
     assert skills("add", "solo", "--from", str(one), "--link") == 0
-    link = skillpacks.packs_dir() / "solo" / "skills" / "single"
+    link = skillpacks.packs_dir() / "solo" / ".claude" / "skills" / "single"
     assert link.is_symlink() and os.path.realpath(link) == os.path.realpath(one)
     capsys.readouterr()
 
@@ -180,7 +183,7 @@ def test_skills_add_from_a_plugin_like_folder_and_bad_requires(fake_home, capsys
     plug = fake_home.tmp / "plugin-like"
     skill(plug / "skills" / "x", "x", "X")
     assert skills("add", "plug", "--from", str(plug)) == 0
-    assert (skillpacks.packs_dir() / "plug" / "skills" / "x" / "SKILL.md").is_file()
+    assert (skillpacks.packs_dir() / "plug" / ".claude" / "skills" / "x" / "SKILL.md").is_file()
     assert skills("add", "bad", "--from", str(plug), "--requires", "rm -rf /") == 2
     assert not (skillpacks.packs_dir() / "bad").exists()
 
@@ -201,7 +204,7 @@ def test_screen_skill_packs(packs):
         sl.select("playwright")
         await settle(pilot)
         pv = str(app.query_one("#preview", Static).render())
-        assert "--plugin-dir" in pv and "Skill packs: playwright (1 skills)" in pv
+        assert "--add-dir" in pv and "--plugin-dir" not in pv and "Skill packs: playwright (1 skills)" in pv
         assert "needs playwright-cli (not found)" in pv and app.plan_ok
         await pilot.press("ctrl+n")
         await settle(pilot)
@@ -214,7 +217,7 @@ def test_screen_skill_packs(packs):
     assert result[1].skill_packs == ["docs"]
 
 
-def test_ensure_manifest_never_writes_through_a_linked_pack(fake_home, tmp_path):
+def test_ensure_layout_never_writes_through_a_linked_pack(fake_home, tmp_path):
     target = tmp_path / "myrepo"
     (target / "skills" / "s1").mkdir(parents=True)
     (target / "skills" / "s1" / "SKILL.md").write_text("---\nname: s1\ndescription: d\n---\nbody\n")
@@ -222,6 +225,7 @@ def test_ensure_manifest_never_writes_through_a_linked_pack(fake_home, tmp_path)
     packs.mkdir(parents=True, exist_ok=True)
     (packs / "mine").symlink_to(target)
     pack = next(p for p in skillpacks.discover() if p.name == "mine")
-    warning = skillpacks.ensure_manifest(pack)
-    assert warning and "linked pack" in warning
-    assert not (target / ".claude-plugin").exists()
+    assert pack.legacy
+    warning = skillpacks.ensure_layout(pack)
+    assert warning and "move them to .claude/skills" in warning
+    assert (target / "skills" / "s1").is_dir() and not (target / ".claude").exists()  # untouched

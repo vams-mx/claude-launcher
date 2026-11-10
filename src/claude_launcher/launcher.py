@@ -163,9 +163,9 @@ def launch(
     on_started: Callable[[], None] | None = None,
 ) -> int:
     plan = build_plan(cat, sel, claude_bin=claude_bin)
-    for name in sel.skill_packs:  # --plugin-dir wants a manifest; cm writes a minimal one if missing
+    for name in sel.skill_packs:  # an old pack (skills/) gets the layout --add-dir reads
         pack = cat.skill_pack(name)
-        if pack is not None and (w := skillpacks.ensure_manifest(pack)):
+        if pack is not None and (w := skillpacks.ensure_layout(pack)):
             print(f"cm: warning: {w}", file=sys.stderr)
     try:
         d = persist_session_files(plan)

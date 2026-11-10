@@ -28,7 +28,7 @@ cm --mcp agentmemory,github          # or headless: just these two servers
 - **Remembers each project.** The screen opens with what you last launched in that project (never Skip permissions), resuming the session you were in, so you don't tick the same servers every time and continuing is one Enter away.
 - **Recent sessions, forks and names.** Resume one of the project's last sessions from the screen, optionally as a named fork, and give every session a name at launch (`--name`), so `/rename` isn't needed afterwards.
 - **Agents.** Start a session as one of your agents (`claude --agent`): yours, the project's, or a plugin's, whose plugin cm ticks for you.
-- **Skill packs.** Keep optional skills (a browser-automation skill, say) out of every session's context and load them only where you tick them (`--plugin-dir`, nothing installed).
+- **Skill packs.** Keep optional skills (a browser-automation skill, say) out of every session's context and load them only where you tick them (`--add-dir`, nothing installed).
 - **Install plugins from cm.** Search your marketplaces and install a plugin (`claude plugin install`) without leaving the screen; cm never auto-accepts anything for you.
 - **Worktrees.** Start a session, or a fork of a recent one, in its own git worktree (`claude -w`), named after the session. cm warns before Claude would reuse, reset or replace an existing worktree, and lists the sessions of the repository's worktrees too.
 - **Keep awake (macOS).** Optionally keep the Mac from sleeping for exactly as long as the session runs (`caffeinate -ims` or `-dims`, ended with Claude). Power settings are never changed.
@@ -139,7 +139,7 @@ cm --resume <id> --fork --name "X v2" --worktree   # fork into its own git workt
 cm --mcp none --worktree spike --tmux          # a new session in worktree "spike", inside tmux
 cm --mcp github --awake ims          # macOS: keep the Mac awake while this session runs
 cm --agent basic-dev-team:coordinator   # start as a plugin's agent (its plugin is ticked for the session)
-cm --skill-packs playwright          # a skill pack for this session only (--plugin-dir)
+cm --skill-packs playwright          # a skill pack for this session only (--add-dir)
 cm plugins available --search browser   # plugins of your marketplaces; then: cm plugins install NAME@MARKET
 cm skills add playwright --from DIR  # turn a folder of skills into a pack (cm skills list / remove)
 cm --list                            # everything that can be selected, with measured context cost
@@ -370,7 +370,7 @@ cm --mcp none --name "Scratch"             # headless launches never ask for a n
 * `--name NAME` has only a long form, because `-n` is cm's `--dry-run`. It is not a selection flag: `cm --name X` alone still opens the screen, with Name filled in, on Resume of the session already called X if there is one ([resume by name](#resume-by-name)).
 * `--fork` needs `--resume <id>` or `--continue`; anything else (including `--resume` without an id) is an error.
 * A name given both to cm and after `--` (`--name`/`-n`) is an error rather than two names. One given only after `--` is passed through as usual.
-* `--fork-session` and `--name` go right before `--resume`, which stays last. `--agent` and the skill packs' `--plugin-dir`s go before the forwarded args. cm never passes `--session-id`.
+* `--fork-session` and `--name` go right before `--resume`, which stays last. `--agent` and the skill packs' `--add-dir`s go before the forwarded args. cm never passes `--session-id`.
 
 **`--name` with `--resume` renames the session.** This was checked by reading Claude Code 2.1.281's own code, not by running a session. `--name` sets the session's title outright, while restoring a resumed (or forked) session only fills in its stored title when none is set yet, so the name you pass wins whichever happens first. Claude then writes it to the transcript as a `custom-title` record (the record `/rename` writes) when it re-appends the session's metadata. With `--fork-session` the name belongs to the new session, and the original keeps its own. If another *running* session on the same machine already uses that name, Claude may add a suffix to it.
 
@@ -491,19 +491,20 @@ The **Agent** box (in the Session area) picks the session's main agent, passed a
 
 ## Skill packs
 
-Skills in `~/.claude/skills` and in the project's `.claude/skills` **always load**: every session lists their names and descriptions, and cm can't turn them off per session. Skills you only need now and then (browser automation, a big framework's how-tos) are better kept in a **skill pack**: cm loads a pack only in the sessions where you tick it, through `--plugin-dir <pack>` (Claude Code's *"Load a plugin from a directory … for this session only"*). Nothing is installed, and Claude's own files are never touched.
+Skills in `~/.claude/skills` and in the project's `.claude/skills` **always load**: every session lists their names and descriptions, and cm can't turn them off per session. Skills you only need now and then (browser automation, a big framework's how-tos) are better kept in a **skill pack**: cm loads a pack only in the sessions where you tick it, through `--add-dir <pack>`: Claude Code reads the skills in an added directory's `.claude/skills`. Nothing is installed, and Claude's own files are never touched.
+
+**Why not `--plugin-dir`** (used up to cm 0.5.2): on newer Claude Code versions (seen on 2.1.322; 2.1.281 was fine), passing `--plugin-dir` makes claude stop loading your *installed* plugins, so a plugin agent such as `basic-ops-team:operator` is reported as *"--agent '…' not found"*. `--add-dir` loads the pack's skills and leaves the installed plugins alone. `--add-dir` also lets the session read the pack's folder (cm's own), and with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` a `CLAUDE.md` in a pack would load too, so keep packs to skills (cm notes a `CLAUDE.md` in a pack).
 
 ```
 ~/.claude-launcher/skills/<pack>/
-  .claude-plugin/plugin.json     {"name": "<pack>", "description": …}   cm writes it if missing
-  skills/<skill>/SKILL.md        one folder per skill (frontmatter name / description)
+  .claude/skills/<skill>/SKILL.md   one folder per skill (frontmatter name / description)
   pack.json                      optional: {"description": "...", "requires": [{"command": "playwright-cli",
                                             "install_hint": "npm i -g @playwright/cli"}]}
 ```
 
-* **On the screen** the *Skill packs* group lists each pack with its number of skills and its context cost: measured (`cm --measure pack:<name>`) or estimated from its skills' names and descriptions (`~120 tok est.`; a skill's body loads only when it is used). A pack whose `requires` command isn't on your `PATH` shows *needs playwright-cli (not found)*, and the preview warns with the install hint; it is never blocked. A pack whose `plugin.json` can't be read is greyed out with the reason.
+* **On the screen** the *Skill packs* group lists each pack with its number of skills and its context cost: measured (`cm --measure pack:<name>`) or estimated from its skills' names and descriptions (`~120 tok est.`; a skill's body loads only when it is used). A pack whose `requires` command isn't on your `PATH` shows *needs playwright-cli (not found)*, and the preview warns with the install hint; it is never blocked. A pack with no skills is greyed out with the reason.
 * Ticked packs are remembered per project and stored in profiles. `cm --skill-packs none|all|a,b` selects them from the command line.
-* **The shape** follows `claude plugin validate`: a kebab-case pack name (lowercase letters, digits, `-`), a manifest with `name`, `description`, `version` and `author` (cm writes all four, so the validator has nothing to warn about), and a frontmatter `description` in every `SKILL.md` (cm notes a missing one). Check a pack yourself with `claude plugin validate ~/.claude-launcher/skills/<pack>` (manifest) and `claude plugin validate ~/.claude-launcher/skills/<pack>/skills` (the skills).
+* **The shape:** a kebab-case pack name (lowercase letters, digits, `-`) and a frontmatter `description` in every `SKILL.md` (cm notes a missing one). Packs made by cm 0.5.0–0.5.2 kept their skills in `skills/` with a `.claude-plugin/plugin.json`; cm moves `skills/` to `.claude/skills` at the next launch (a linked pack is never written into: cm tells you to move it yourself), and the old manifest is ignored.
 
 ```bash
 cm skills add NAME --from DIR [--link] [--description TEXT] [--requires CMD[=INSTALL_HINT]]
@@ -511,7 +512,7 @@ cm skills list [--json]
 cm skills remove NAME [--yes]        # asks first; a linked skill's target is never deleted
 ```
 
-`--from` takes a skill folder (it holds `SKILL.md`), a folder of skill folders, or a folder with a `skills/` folder of them. They are copied, or symlinked with `--link` (whether Claude Code follows a symlinked skill folder inside a `--plugin-dir` is not verified; copy when in doubt).
+`--from` takes a skill folder (it holds `SKILL.md`), a folder of skill folders, or a folder with a `skills/` folder of them. They are copied, or symlinked with `--link` (whether Claude Code follows a symlinked skill folder in an added directory is not verified; copy when in doubt).
 
 **Recipe: playwright-cli as a skill pack.** Microsoft's `playwright-cli` drives a browser from the shell, and ships a skill that teaches Claude to use it. Keep that skill out of sessions that don't browse:
 
@@ -633,7 +634,8 @@ This is documented behaviour of Claude Code, **verified on Claude Code 2.1.281**
 | `--settings '{"enabledPlugins":{"<id>":false}}'` | Disables a plugin for the session, overriding user **and** project/local scope. | **yes** |
 | `--settings '{"enabledPlugins":{"<id>":true}}'` for a plugin not installed for this scope | Does **not** load it. | no |
 | `--setting-sources` | Can drop user settings, but that also drops your `env`, model, statusLine and so on. Not used. | not used |
-| `--plugin-dir` | Adds a plugin for the session only. Its bundled MCP servers are dropped under `--strict-mcp-config`. | yes |
+| `--plugin-dir` | Adds a plugin for the session only. Its bundled MCP servers are dropped under `--strict-mcp-config`. On newer Claude Code (2.1.322) it also stops the installed plugins from loading, so cm no longer uses it. | yes (2.1.281) |
+| `--add-dir <dir>` | Also loads the skills in `<dir>/.claude/skills`, leaving installed plugins alone (cm's skill packs). | yes (2.1.281, 2.1.322) |
 | hooks in `--settings` | **Added** to user/project hooks, not replacing them. | **yes** |
 | more than one `--settings` | Claude reads only one. cm always passes exactly one merged file. | avoided |
 | `cmux-claude-wrapper` | Adds `--session-id` (not when the command already has `--session-id`, `--resume` or `--continue`; cm itself never passes `--session-id`), deep-merges a user `--settings` into its own hooks file and, unless `--strict-mcp-config` or `CMUX_COMPUTER_USE_MCP_DISABLED=1` is present, prepends its own `cmux-cua` `--mcp-config` and exports the token. | **yes** |
