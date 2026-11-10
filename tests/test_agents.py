@@ -222,3 +222,25 @@ def test_list_shows_agents_and_skill_packs(agents, capsys):
     assert cli.main(["--claude-bin", "claude", "--list"]) == 0
     out = capsys.readouterr().out
     assert "skill pack" in out and "agent" in out
+
+
+def test_the_default_agents_plugin_stays_enabled(agents):
+    # regression: the `agent` setting names a plugin agent (e.g. basic-ops-team:operator); cm disabled
+    # every unticked plugin, so claude started with "--agent '<plugin>:<agent>' not found"
+    _w(agents.project / ".claude" / "settings.local.json",
+       {"enabledPlugins": {"commit-commands@official": True}, "agent": "commit-commands:helper"})
+    cat = discover(agents.project)
+    plan = build_plan(cat, Selection(plugins=[]), claude_bin="claude")
+    assert plan.settings_doc["enabledPlugins"]["commit-commands@official"] is True
+    assert "--agent" not in plan.argv
+    assert any("kept it enabled" in w for w in plan.warnings)
+    # an agent chosen explicitly wins: the default agent's plugin is not forced on
+    other = build_plan(cat, Selection(agent="reviewer"), claude_bin="claude")
+    assert other.settings_doc["enabledPlugins"]["commit-commands@official"] is False
+
+
+def test_a_default_agent_whose_plugin_is_not_here_warns(agents):
+    _w(agents.project / ".claude" / "settings.local.json", {"agent": "team:coordinator"})
+    cat = discover(agents.project)
+    plan = build_plan(cat, Selection(), claude_bin="claude")
+    assert any("default agent from settings" in w and "another project" in w for w in plan.warnings)

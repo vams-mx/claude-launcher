@@ -300,7 +300,19 @@ def build_plan(
     for c in sel.connectors:
         if c not in known_conn:
             raise PlanError(f"unknown claude.ai connector {c!r} (run `cm --refresh`)")
-    plugin_mcp = [s for pid in sel.plugins for s in ((cat.plugin(pid).mcp_servers if cat.plugin(pid) else []))]
+    # The Default agent (no --agent) is the `agent` setting. When it comes with a plugin, that plugin
+    # must stay enabled even if it isn't ticked, or claude starts with an agent it can't find
+    # ("--agent '<plugin>:<agent>' not found").
+    default_plugin: str | None = None
+    if not sel.agent and cat.settings_agent and (dflt := cat.agent(cat.settings_agent)) and dflt.plugin_id:
+        if why := cat.agent_block(dflt):
+            warnings.append(f"default agent from settings: {why}")
+        elif dflt.plugin_id not in sel.plugins:
+            default_plugin = dflt.plugin_id
+            warnings.append(f"default agent {dflt.name} (from settings) comes with plugin {dflt.plugin_id}: "
+                            "kept it enabled for this session")
+    enabled_plugins = [*sel.plugins, *([default_plugin] if default_plugin else [])]
+    plugin_mcp = [s for pid in enabled_plugins for s in ((cat.plugin(pid).mcp_servers if cat.plugin(pid) else []))]
     mode = "denylist" if (sel.connectors or plugin_mcp) else "strict"
 
     # --- plugins ------------------------------------------------------------
@@ -326,7 +338,7 @@ def build_plan(
             raise PlanError(f"skill pack {name}: {pack.error}")
         packs.append(pack)
         warnings += [f"skill pack {name}: {w}" for w in pack.warnings()]
-    settings["enabledPlugins"] = {p.id: (p.id in sel.plugins) for p in cat.plugins}
+    settings["enabledPlugins"] = {p.id: (p.id in enabled_plugins) for p in cat.plugins}
 
     selected_names = list(servers) + list(sel.connectors) + plugin_mcp
     denied: list[str] = []
